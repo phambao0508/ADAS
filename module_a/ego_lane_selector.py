@@ -72,6 +72,7 @@ OUTPUTS
 from typing import List, Optional, NamedTuple
 
 import numpy as np
+import cv2
 
 
 # ── Class IDs from the YOLO model ─────────────────────────────────────────
@@ -92,13 +93,15 @@ HORIZON_Y_FRAC = 0.30   # was 0.40 — lowered because video horizon is higher
 
 class EgoLaneLines(NamedTuple):
     """Result of ego-lane selection. Contains both box and mask for each side."""
-    left_det:    Optional[List[float]]    # [x1,y1,x2,y2,conf,cls] or None
-    right_det:   Optional[List[float]]    # [x1,y1,x2,y2,conf,cls] or None
-    left_mask:   Optional[np.ndarray]     # segmentation mask (H,W) or None
-    right_mask:  Optional[np.ndarray]     # segmentation mask (H,W) or None
-    left_label:  Optional[str]            # 'white' or 'yellow' or None
-    right_label: Optional[str]            # 'white' or 'yellow' or None
-    found:       bool                     # True if at least one boundary found
+    left_det:       Optional[List[float]]    # [x1,y1,x2,y2,conf,cls] or None
+    right_det:      Optional[List[float]]    # [x1,y1,x2,y2,conf,cls] or None
+    left_mask:      Optional[np.ndarray]     # segmentation mask (H,W) or None
+    right_mask:     Optional[np.ndarray]     # segmentation mask (H,W) or None
+    left_label:     Optional[str]            # 'white' or 'yellow' or None
+    right_label:    Optional[str]            # 'white' or 'yellow' or None
+    found:          bool                     # True if at least one boundary found
+    left_det_count:  int = 1                 # how many detections merged on left
+    right_det_count: int = 1                 # how many detections merged on right
 
 
 def select_ego_lane(
@@ -126,14 +129,12 @@ def select_ego_lane(
     cx_frame      = frame_w / 2.0
     upper_limit_y = frame_h * HORIZON_Y_FRAC
 
-    best_left_det    = None
-    best_right_det   = None
-    best_left_mask   = None
-    best_right_mask  = None
-    best_left_dist   = float('inf')
-    best_right_dist  = float('inf')
-    best_left_inner  = None   # x2 of selected left  line (for span check only)
-    best_right_inner = None   # x1 of selected right line (for span check only)
+    # ── Collect ALL lane-line detections per side ─────────────────────────
+    # For dashed lines each dash is a separate YOLO detection.  We must
+    # merge every dash on the same side into ONE combined mask so the
+    # boundary extractor and poly fitter see the full extent of the line.
+    left_dets:   list = []   # list of (det, mask, dist)
+    right_dets:  list = []
 
     for idx, det in enumerate(detections):
         x1, y1, x2, y2, conf, cls_id = det[:6]
@@ -149,37 +150,61 @@ def select_ego_lane(
             continue
 
         # ── Side assignment: use box CENTRE (cx) ──────────────────────────
-        # cx correctly reflects which side of the car the line is on.
-        # Inner-edge assignment caused dividers near frame_center to be
-        # mis-classified as opposite-side candidates.
         cx   = (x1 + x2) / 2.0
         mask = masks[idx] if idx < len(masks) else None
 
         if cx < cx_frame:
             dist = cx_frame - cx
-            if dist < best_left_dist:
-                best_left_dist   = dist
-                best_left_det    = det
-                best_left_mask   = mask
-                best_left_inner  = x2   # inner wall (faces right / ego lane)
+            left_dets.append((det, mask, dist))
         else:
             dist = cx - cx_frame
-            if dist < best_right_dist:
-                best_right_dist  = dist
-                best_right_det   = det
-                best_right_mask  = mask
-                best_right_inner = x1   # inner wall (faces left / ego lane)
+            right_dets.append((det, mask, dist))
+
+    # ── Merge masks: only dashes belonging to the SAME lane line ────────────
+    # On multi-lane roads, multiple lines appear on each side. We must only
+    # merge dashes that belong to the ego-lane boundary (the closest line).
+    # Strategy: pick the closest detection, get its cx, then merge only
+    # detections whose cx is within CX_TOLERANCE of that reference.
+    CX_TOLERANCE = frame_w * 0.08   # ~8% of frame width
+
+    def _merge(det_list, frame_h, frame_w):
+        """Merge only dashes belonging to the closest lane line.
+        Returns (best_det, combined_mask, merged_count)."""
+        if not det_list:
+            return None, None, 0
+        # Sort by distance so det_list[0] is the closest to frame center
+        det_list.sort(key=lambda t: t[2])
+        best_det = det_list[0][0]
+        ref_cx   = (best_det[0] + best_det[2]) / 2.0   # cx of ego boundary
+
+        # OR only masks whose cx is close to the reference (same lane line)
+        combined = np.zeros((frame_h, frame_w), dtype=np.uint8)
+        merged_count = 0
+        for _det, _mask, _dist in det_list:
+            det_cx = (_det[0] + _det[2]) / 2.0
+            if abs(det_cx - ref_cx) <= CX_TOLERANCE:
+                merged_count += 1
+                if _mask is not None:
+                    combined = cv2.bitwise_or(combined, _mask)
+
+        return best_det, combined, merged_count
+
+    best_left_det,  best_left_mask,  left_count  = _merge(left_dets,  frame_h, frame_w)
+    best_right_det, best_right_mask, right_count = _merge(right_dets, frame_h, frame_w)
+
+    # Inner wall x-coordinates for span check
+    best_left_inner  = best_left_det[2]  if best_left_det  is not None else None  # x2
+    best_right_inner = best_right_det[0] if best_right_det is not None else None  # x1
 
     # ── Post-selection: reject 2-lane span ────────────────────────────────
-    # If the inner walls of the two selected lines span > 45% of frame width
-    # the selector has grabbed lines from separate lanes (road outer edges).
-    # Drop the farther boundary so only one confirmed side is used;
-    # lane_overlay.py's fill-width guard then prevents a bad fill.
-    MAX_EGO_LANE_FRAC = 0.50    # must match MAX_LANE_FILL_FRAC in lane_overlay.py
+    MAX_EGO_LANE_FRAC = 0.50
     if best_left_inner is not None and best_right_inner is not None:
         span = best_right_inner - best_left_inner
         if span <= 0 or span > MAX_EGO_LANE_FRAC * frame_w:
-            if best_left_dist >= best_right_dist:
+            # Determine which side to drop based on closest distance
+            left_min_dist  = min(t[2] for t in left_dets)  if left_dets  else float('inf')
+            right_min_dist = min(t[2] for t in right_dets) if right_dets else float('inf')
+            if left_min_dist >= right_min_dist:
                 best_left_det   = None
                 best_left_mask  = None
                 best_left_inner = None
@@ -197,11 +222,13 @@ def select_ego_lane(
     found = (best_left_det is not None) or (best_right_det is not None)
 
     return EgoLaneLines(
-        left_det    = best_left_det,
-        right_det   = best_right_det,
-        left_mask   = best_left_mask,
-        right_mask  = best_right_mask,
-        left_label  = _label(best_left_det),
-        right_label = _label(best_right_det),
-        found       = found,
+        left_det        = best_left_det,
+        right_det       = best_right_det,
+        left_mask       = best_left_mask,
+        right_mask      = best_right_mask,
+        left_label      = _label(best_left_det),
+        right_label     = _label(best_right_det),
+        found           = found,
+        left_det_count  = left_count  if best_left_det  is not None else 0,
+        right_det_count = right_count if best_right_det is not None else 0,
     )

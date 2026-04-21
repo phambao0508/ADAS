@@ -1,26 +1,19 @@
 """
-Module D  —  Step D5: Mini-Map Schematic (Bottom Left)  [Redesigned]
-=====================================================================
-Redesigned to match the HUD demo aesthetic:
-  - Glowing ego-vehicle triangle in state colour
-  - Adjacent lanes shaded clear (blue-tint) or occupied (red-tint)
-  - Guidance directional arrows drawn in adjacent lane when GUIDE_LEFT/RIGHT
-  - Front vehicle box with colour coded by proximity (orange=CLOSE, red=VERY_CLOSE)
-  - Lateral offset dot above ego triangle
-  - "BIRD EYE" label at top with dim monospaced style
-  - Dark panel with subtle border
+Module D  —  Step D5: Mini-Map Schematic (Bottom Left)  [UTOUR-Style Redesign]
+===============================================================================
+Redesigned to match the UTOUR automotive HUD aesthetic:
+  - Light blue-gray background panel with rounded corners
+  - Perspective road with converging lane lines
+  - Stylized ego-vehicle (top-down car silhouette) at bottom
+  - Teal/cyan detection cone fanning out ahead
+  - Object silhouettes for front/side detected vehicles
+  - Status display at top (proximity indicator)
+  - Soft, modern, minimal design
 
 MAP COORDINATE SYSTEM
 ---------------------
-    Left  20% = left adjacent lane
-    Middle 60% = ego lane
-    Right 20% = right adjacent lane
-
-SIGN CONVENTION (from B1)
---------------------------
-    offset > 0 → car is LEFT  of lane centre → dot moves left
-    offset < 0 → car is RIGHT of lane centre → dot moves right
-    We NEGATE the raw offset to get physical screen direction.
+    The road is drawn in perspective: lane lines converge toward
+    a vanishing point at the top-centre of the panel.
 
 INPUTS
 ------
@@ -42,34 +35,52 @@ import numpy as np
 import cv2
 from typing import Optional
 
-from .hud_colours import lane_fill_colour, DEPARTURE_COLOURS, GUIDANCE_COLOURS
+from .hud_colours import lane_fill_colour, DEPARTURE_COLOURS
 
 _PROX_CLOSE       = "CLOSE"
 _PROX_VERY_CLOSE  = "VERY_CLOSE"
 
 
 # ── Mini-map panel dimensions ────────────────────────────────────────────
-MAP_WIDTH   = 230    # px  (was 155)
-MAP_HEIGHT  = 185    # px  (was 125)
+MAP_WIDTH   = 220    # px
+MAP_HEIGHT  = 340    # px  (taller for perspective road)
 MAP_MARGIN  = 14     # px from bottom-left corner
-
-ADJ_LANE_W_FRAC = 0.20     # each adjacent lane = 20% of map width
-EGO_LANE_W_FRAC = 0.60     # ego lane            = 60% of map width
+CORNER_RAD  = 18     # rounded corner radius
 
 # ── Colours (BGR) ─────────────────────────────────────────────────────────
-COL_MAP_BG       = (  8,  12,  20)   # #06090f  very dark blue
-COL_MAP_BORDER   = ( 55,  70,  90)   # dim blue-grey border — #1e2d45 approx
-COL_ADJ_CLEAR    = ( 50,  40,  10)   # dim blue tint (clear)
-COL_ADJ_OCCUPIED = ( 30,  30, 110)   # red tint (occupied) → BGR
-COL_DIVIDER_L    = (238, 204,   0)   # cyan  #00ccee
-COL_DIVIDER_R    = (  0, 136, 255)   # orange #ff8800
-COL_DIVIDER_DANGER=(51,  51, 255)    # red when departing
-COL_OUTER_DIV    = ( 90, 100, 120)   # outer dividers
-COL_LABEL        = ( 90, 110, 130)   # dim label text
-COL_OFFSET_DOT   = (210, 210, 210)   # white dot
-COL_FRONT_CLOSE  = (  0, 136, 255)   # orange — CLOSE
-COL_FRONT_URGENT = ( 51,  51, 255)   # red    — VERY_CLOSE
-MAX_OFFSET_DISPLAY = 150             # px offset → edge of ego lane
+# Background: soft muted blue-gray  (#bcc6cc ≈ BGR 204, 198, 188)
+COL_BG_TOP      = (212, 208, 200)   # lighter top
+COL_BG_BOT      = (200, 196, 188)   # slightly darker bottom
+
+# Road / asphalt
+COL_ROAD_FILL   = (185, 182, 178)   # warm gray road
+
+# Lane lines
+COL_LANE_LINE   = (175, 130,  60)   # medium blue lane lines (BGR)
+COL_LANE_SOLID  = (165, 120,  50)   # slightly darker for solid
+
+# Detection cone: teal/cyan
+COL_CONE_FILL   = (195, 205, 160)   # soft teal
+COL_CONE_EDGE   = (180, 190, 120)   # teal edge
+
+# Ego vehicle
+COL_EGO_BODY    = (240, 240, 240)   # white/silver
+COL_EGO_ACCENT  = (200, 200, 205)   # subtle metallic accent
+COL_EGO_WINDOW  = (185, 180, 150)   # blue-tint windshield
+COL_EGO_OUTLINE = (180, 180, 185)   # subtle outline
+
+# Detected objects
+COL_OBJ_CAR     = ( 80,  85, 165)   # red-ish silhouette for front car
+COL_OBJ_SIDE    = (105, 105, 115)   # dark gray for side vehicles
+
+# Text
+COL_TEXT_MAIN    = ( 45,  45,  45)   # dark text
+COL_TEXT_DIM     = (120, 120, 120)   # dim labels
+COL_TEXT_BRAND   = (155, 155, 155)   # branding
+
+# Warning states
+COL_WARNING      = ( 55,  75, 215)  # red warning
+COL_CAUTION      = ( 45, 130, 220)  # orange caution
 
 
 def draw_mini_map(
@@ -83,144 +94,340 @@ def draw_mini_map(
     right_type:      str,
     guidance_state:  str = "GUIDE_NONE",
 ) -> np.ndarray:
-    """Draw the top-down schematic mini-map in the bottom-left corner."""
+    """Draw the UTOUR-style top-down schematic mini-map in the bottom-left corner."""
     H, W = frame.shape[:2]
 
     mw, mh = MAP_WIDTH, MAP_HEIGHT
-    canvas  = np.zeros((mh, mw, 3), dtype=np.uint8)
-    canvas[:] = COL_MAP_BG
+    canvas = np.zeros((mh, mw, 3), dtype=np.uint8)
 
-    left_w   = int(mw * ADJ_LANE_W_FRAC)
-    right_w  = int(mw * ADJ_LANE_W_FRAC)
-    ego_w    = mw - left_w - right_w
-    ego_cx   = left_w + ego_w // 2
+    # ── Gradient background ───────────────────────────────────────────────
+    _draw_gradient_bg(canvas, mw, mh)
 
-    # ── Adjacent lane backgrounds ─────────────────────────────────────────
-    l_col = COL_ADJ_CLEAR    if left_clear  else COL_ADJ_OCCUPIED
-    r_col = COL_ADJ_CLEAR    if right_clear else COL_ADJ_OCCUPIED
-    cv2.rectangle(canvas, (0, 0),                (left_w - 1,  mh - 1), l_col, cv2.FILLED)
-    cv2.rectangle(canvas, (mw - right_w, 0),     (mw - 1,      mh - 1), r_col, cv2.FILLED)
+    # ── Perspective road geometry ─────────────────────────────────────────
+    vp_x = mw // 2          # vanishing point x
+    vp_y = int(mh * 0.14)   # vanishing point y (near top)
+    road_bot_y = mh - 28    # bottom of road
 
-    # ── Ego lane background (state colour, very dim) ──────────────────────
-    lane_col = lane_fill_colour(departure_state)
-    b, g, r  = lane_col
-    dash_ego = (max(0, b - 100), max(0, g - 100), max(0, r - 100))
-    cv2.rectangle(canvas, (left_w, 0), (left_w + ego_w - 1, mh - 1), dash_ego, cv2.FILLED)
+    # Road edges at bottom (wide) and converge at VP
+    road_bl_x = int(mw * 0.12)   # bottom-left road edge
+    road_br_x = int(mw * 0.88)   # bottom-right road edge
 
-    # ── Lane dividers ─────────────────────────────────────────────────────
-    left_div_clr  = COL_DIVIDER_DANGER if departure_state in (
-        "DEPART_LEFT", "LANE_CHANGE_LEFT", "WARN_LEFT") else COL_DIVIDER_L
-    right_div_clr = COL_DIVIDER_DANGER if departure_state in (
-        "DEPART_RIGHT", "LANE_CHANGE_RIGHT", "WARN_RIGHT") else COL_DIVIDER_R
+    # Draw road surface
+    road_pts = np.array([
+        [vp_x - 3, vp_y],
+        [vp_x + 3, vp_y],
+        [road_br_x, road_bot_y],
+        [road_bl_x, road_bot_y],
+    ], dtype=np.int32)
+    cv2.fillPoly(canvas, [road_pts], COL_ROAD_FILL)
 
-    _draw_lane_divider(canvas, left_w,         left_type,  mh, left_div_clr)
-    _draw_lane_divider(canvas, left_w + ego_w, right_type, mh, right_div_clr)
+    # ── Lane markings in perspective ──────────────────────────────────────
+    road_cx_bot = (road_bl_x + road_br_x) // 2
+    road_w_bot = road_br_x - road_bl_x
 
-    # Outer dividers (dim)
-    _draw_lane_divider(canvas, 1,      "dashed", mh, COL_OUTER_DIV)
-    _draw_lane_divider(canvas, mw - 2, "dashed", mh, COL_OUTER_DIV)
+    # Ego lane boundaries (inner pair — thicker, more prominent)
+    left_ego_x  = road_bl_x + int(road_w_bot * 0.33)
+    right_ego_x = road_bl_x + int(road_w_bot * 0.67)
 
-    # ── Guidance arrows in adjacent lanes ─────────────────────────────────
-    if guidance_state in ("GUIDE_LEFT", "GUIDE_BOTH"):
-        _draw_arrow(canvas, left_w // 2, mh // 2, "left",  COL_DIVIDER_L)
-    if guidance_state in ("GUIDE_RIGHT", "GUIDE_BOTH"):
-        _draw_arrow(canvas, left_w + ego_w + right_w // 2, mh // 2, "right", COL_DIVIDER_R)
+    _draw_persp_line(canvas, vp_x, vp_y, left_ego_x,  road_bot_y, left_type,
+                     COL_LANE_LINE, departure_state, "left",  thickness=2)
+    _draw_persp_line(canvas, vp_x, vp_y, right_ego_x, road_bot_y, right_type,
+                     COL_LANE_LINE, departure_state, "right", thickness=2)
 
-    # ── Ego vehicle marker (▲) with glow ──────────────────────────────────
-    ego_veh_y = mh - 28
-    _draw_triangle(canvas, ego_cx, ego_veh_y, 14, lane_col)
+    # Outer lane lines (dimmer, thinner)
+    outer_col = tuple(min(255, c + 40) for c in COL_LANE_LINE)
+    _draw_persp_line(canvas, vp_x, vp_y, road_bl_x + int(road_w_bot * 0.08), road_bot_y,
+                     "dashed", outer_col, departure_state, "left", thickness=1)
+    _draw_persp_line(canvas, vp_x, vp_y, road_bl_x + int(road_w_bot * 0.92), road_bot_y,
+                     "dashed", outer_col, departure_state, "right", thickness=1)
 
-    # ── Lateral offset dot ────────────────────────────────────────────────
-    if smoothed_offset is not None:
-        half_ego = ego_w // 2
-        # Negate: offset>0 → car left → dot left; offset<0 → car right → dot right
-        shift = -int(smoothed_offset / MAX_OFFSET_DISPLAY * half_ego)
-        shift = max(-half_ego, min(half_ego, shift))
-        dot_x = ego_cx + shift
-        dot_y = ego_veh_y - 20
-        cv2.circle(canvas, (dot_x, dot_y), 4, COL_OFFSET_DOT, cv2.FILLED)
+    # ── Detection cone (teal/cyan fan) ────────────────────────────────────
+    _draw_detection_cone(canvas, mw, mh)
 
-    # ── Front vehicle box ─────────────────────────────────────────────────
+    # ── Detected objects ──────────────────────────────────────────────────
+    # Front vehicle
     if front_proximity in (_PROX_CLOSE, _PROX_VERY_CLOSE):
-        fv_col = COL_FRONT_URGENT if front_proximity == _PROX_VERY_CLOSE else COL_FRONT_CLOSE
-        fv_y   = 24 if front_proximity == _PROX_VERY_CLOSE else 40
-        fv_h   = 14
-        fv_x1  = left_w + ego_w // 5
-        fv_x2  = left_w + 4 * ego_w // 5
-        cv2.rectangle(canvas, (fv_x1, fv_y), (fv_x2, fv_y + fv_h), fv_col, 1)
-        if front_proximity == _PROX_VERY_CLOSE:
-            # Fill for urgent
-            fill = (int(fv_col[0] * 0.35), int(fv_col[1] * 0.35), int(fv_col[2] * 0.35))
-            cv2.rectangle(canvas, (fv_x1 + 1, fv_y + 1),
-                          (fv_x2 - 1, fv_y + fv_h - 1), fill, cv2.FILLED)
+        fv_y = int(mh * 0.35) if front_proximity == _PROX_VERY_CLOSE else int(mh * 0.26)
+        col = COL_WARNING if front_proximity == _PROX_VERY_CLOSE else COL_OBJ_CAR
+        _draw_front_car(canvas, vp_x, fv_y, colour=col)
 
-    # ── Adjacent vehicle boxes (left / right) ─────────────────────────────
+    # Side objects (vehicles in adjacent lanes)
     if not left_clear:
-        lv_w = int(left_w * 0.55)
-        lv_cx = left_w // 2
-        cv2.rectangle(canvas, (lv_cx - lv_w // 2, mh // 2 - 5),
-                      (lv_cx + lv_w // 2, mh // 2 + 5), (100, 100, 220), 1)
+        lv_x = road_bl_x + int(road_w_bot * 0.18)
+        _draw_side_car(canvas, lv_x, int(mh * 0.55), COL_OBJ_SIDE)
+
     if not right_clear:
-        rv_w  = int(right_w * 0.55)
-        rv_cx = left_w + ego_w + right_w // 2
-        cv2.rectangle(canvas, (rv_cx - rv_w // 2, mh // 2 - 5),
-                      (rv_cx + rv_w // 2, mh // 2 + 5), (100, 100, 220), 1)
+        rv_x = road_bl_x + int(road_w_bot * 0.82)
+        _draw_side_car(canvas, rv_x, int(mh * 0.55), COL_OBJ_SIDE)
 
-    # ── "BIRD EYE" label ──────────────────────────────────────────────────
-    cv2.putText(canvas, "BIRD EYE", (5, 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.42, COL_LABEL, 1, cv2.LINE_AA)
+    # ── Ego vehicle ──────────────────────────────────────────────────────
+    ego_x = mw // 2
+    if smoothed_offset is not None:
+        max_shift = (right_ego_x - left_ego_x) // 4
+        shift = -int(smoothed_offset / 150.0 * max_shift)
+        shift = max(-max_shift, min(max_shift, shift))
+        ego_x += shift
 
-    # ── Border ────────────────────────────────────────────────────────────
-    cv2.rectangle(canvas, (0, 0), (mw - 1, mh - 1), COL_MAP_BORDER, 1)
+    _draw_ego_car(canvas, ego_x, int(mh * 0.76))
 
-    # ── Paste onto main frame (bottom-left) ───────────────────────────────
+    # ── Status indicator at top ───────────────────────────────────────────
+    _draw_status_top(canvas, mw, front_proximity, departure_state)
+
+    # ── Branding ──────────────────────────────────────────────────────────
+    brand = "ADAS"
+    ts = cv2.getTextSize(brand, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0]
+    cv2.putText(canvas, brand, ((mw - ts[0]) // 2, mh - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, COL_TEXT_BRAND, 1, cv2.LINE_AA)
+
+    # ── Rounded-corner mask ───────────────────────────────────────────────
+    mask = _rounded_rect_mask(mw, mh, CORNER_RAD)
+
+    # ── Paste onto frame (bottom-left) with blending ──────────────────────
     px = MAP_MARGIN
     py = H - MAP_HEIGHT - MAP_MARGIN
-    frame[py:py + mh, px:px + mw] = canvas
+    py = max(0, py)
+    paste_h = min(mh, H - py)
+    paste_w = min(mw, W - px)
+
+    roi = frame[py:py + paste_h, px:px + paste_w]
+    mask_roi = mask[:paste_h, :paste_w]
+    canvas_roi = canvas[:paste_h, :paste_w]
+
+    alpha = 0.93
+    blended = cv2.addWeighted(canvas_roi, alpha, roi, 1.0 - alpha, 0)
+    np.copyto(roi, blended, where=(mask_roi[:, :, None] > 0))
 
     return frame
 
 
-def _draw_lane_divider(canvas, x: int, line_type: str, mh: int, colour):
-    """Draw a vertical lane divider line (solid or dashed)."""
+# ═══════════════════════════════════════════════════════════════════════════
+# PRIVATE HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _draw_gradient_bg(canvas, mw, mh):
+    """Vertical gradient from light to slightly less light."""
+    for y in range(mh):
+        t = y / max(1, mh - 1)
+        b = int(COL_BG_TOP[0] * (1 - t) + COL_BG_BOT[0] * t)
+        g = int(COL_BG_TOP[1] * (1 - t) + COL_BG_BOT[1] * t)
+        r = int(COL_BG_TOP[2] * (1 - t) + COL_BG_BOT[2] * t)
+        canvas[y, :] = (b, g, r)
+
+
+def _rounded_rect_mask(w, h, r):
+    """Create a binary mask with rounded corners."""
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.rectangle(mask, (r, 0), (w - r - 1, h - 1), 255, cv2.FILLED)
+    cv2.rectangle(mask, (0, r), (w - 1, h - r - 1), 255, cv2.FILLED)
+    cv2.circle(mask, (r, r), r, 255, cv2.FILLED)
+    cv2.circle(mask, (w - r - 1, r), r, 255, cv2.FILLED)
+    cv2.circle(mask, (r, h - r - 1), r, 255, cv2.FILLED)
+    cv2.circle(mask, (w - r - 1, h - r - 1), r, 255, cv2.FILLED)
+    return mask
+
+
+def _draw_persp_line(canvas, vp_x, vp_y, bot_x, bot_y,
+                     line_type, colour, departure_state, side, thickness=1):
+    """Draw a lane line from vanishing point to bottom in perspective."""
+    if side == "left" and departure_state in ("DEPART_LEFT", "LANE_CHANGE_LEFT", "WARN_LEFT"):
+        colour = COL_WARNING
+    elif side == "right" and departure_state in ("DEPART_RIGHT", "LANE_CHANGE_RIGHT", "WARN_RIGHT"):
+        colour = COL_WARNING
+
     if line_type == "solid":
-        cv2.line(canvas, (x, 0), (x, mh - 1), colour, 1)
+        cv2.line(canvas, (vp_x, vp_y), (bot_x, bot_y), colour, thickness, cv2.LINE_AA)
     else:
-        y = 0
-        draw = True
-        while y < mh:
-            seg_end = min(y + 7, mh - 1)
-            if draw:
-                cv2.line(canvas, (x, y), (x, seg_end), colour, 1)
-            y   += (7 if draw else 5)
-            draw = not draw
+        # Dashed — segments get larger toward the bottom (perspective)
+        n = 14
+        for i in range(n):
+            t1 = i / n
+            t2 = (i + 0.5) / n
+            if i % 2 == 0:
+                x1 = int(vp_x + (bot_x - vp_x) * t1)
+                y1 = int(vp_y + (bot_y - vp_y) * t1)
+                x2 = int(vp_x + (bot_x - vp_x) * t2)
+                y2 = int(vp_y + (bot_y - vp_y) * t2)
+                cv2.line(canvas, (x1, y1), (x2, y2), colour, thickness, cv2.LINE_AA)
 
 
-def _draw_triangle(canvas, cx: int, cy: int, size: int, colour):
-    """Draw an upward-pointing filled triangle (ego vehicle marker)."""
+def _draw_detection_cone(canvas, mw, mh):
+    """Draw the teal detection cone fanning from the ego car forward."""
+    cx = mw // 2
+    ego_y = int(mh * 0.70)
+    cone_top_y = int(mh * 0.28)
+
+    # Narrow at car, wide at detection extent
+    bot_hw = 18
+    top_hw = 52
+
     pts = np.array([
-        [cx,          cy - size],        # apex
-        [cx - size,   cy + size // 2],   # bottom-left
-        [cx + size,   cy + size // 2],   # bottom-right
+        [cx - bot_hw, ego_y],
+        [cx - top_hw, cone_top_y],
+        [cx + top_hw, cone_top_y],
+        [cx + bot_hw, ego_y],
+    ], dtype=np.int32)
+
+    # Semi-transparent fill
+    overlay = canvas.copy()
+    # Soft teal-cyan   (BGR ≈ 200, 210, 170)
+    cv2.fillPoly(overlay, [pts], (200, 210, 170))
+    cv2.addWeighted(overlay, 0.35, canvas, 0.65, 0, canvas)
+
+    # Edge lines
+    edge = (175, 190, 130)
+    cv2.line(canvas, (cx - bot_hw, ego_y), (cx - top_hw, cone_top_y), edge, 1, cv2.LINE_AA)
+    cv2.line(canvas, (cx + bot_hw, ego_y), (cx + top_hw, cone_top_y), edge, 1, cv2.LINE_AA)
+    # Top arc
+    cv2.line(canvas, (cx - top_hw, cone_top_y), (cx + top_hw, cone_top_y), edge, 1, cv2.LINE_AA)
+
+
+def _draw_ego_car(canvas, cx, cy):
+    """
+    Draw a refined top-down car silhouette closely matching the UTOUR reference.
+    The car is viewed from directly above: sleek, aerodynamic shape.
+    """
+    # ── Overall proportions ───────────────────────────────────────────────
+    car_w = 38   # total width
+    car_h = 64   # total length (front to back)
+    hw = car_w // 2
+    hh = car_h // 2
+
+    # ── Car body outline (smooth, aerodynamic) ────────────────────────────
+    body = np.array([
+        # Front nose (aerodynamic point)
+        [cx,           cy - hh - 4],
+        # Front-left fender
+        [cx - hw + 4,  cy - hh + 10],
+        [cx - hw,      cy - hh + 20],
+        # Left side
+        [cx - hw - 1,  cy - 5],
+        [cx - hw,      cy + hh - 12],
+        # Rear-left
+        [cx - hw + 2,  cy + hh - 2],
+        [cx - hw + 5,  cy + hh + 2],
+        # Rear (flat)
+        [cx + hw - 5,  cy + hh + 2],
+        [cx + hw - 2,  cy + hh - 2],
+        # Right side
+        [cx + hw,      cy + hh - 12],
+        [cx + hw + 1,  cy - 5],
+        # Front-right fender
+        [cx + hw,      cy - hh + 20],
+        [cx + hw - 4,  cy - hh + 10],
+    ], dtype=np.int32)
+
+    # Main body fill (white/silver)
+    cv2.fillPoly(canvas, [body], COL_EGO_BODY)
+    # Subtle outline
+    cv2.polylines(canvas, [body], True, COL_EGO_OUTLINE, 1, cv2.LINE_AA)
+
+    # ── Front windshield ──────────────────────────────────────────────────
+    wind = np.array([
+        [cx - hw + 7,  cy - hh + 16],
+        [cx,           cy - hh + 2],
+        [cx + hw - 7,  cy - hh + 16],
+        [cx + hw - 6,  cy - hh + 25],
+        [cx - hw + 6,  cy - hh + 25],
+    ], dtype=np.int32)
+    cv2.fillPoly(canvas, [wind], COL_EGO_WINDOW)
+
+    # ── Roof / cabin ──────────────────────────────────────────────────────
+    roof = np.array([
+        [cx - hw + 6,  cy - hh + 27],
+        [cx + hw - 6,  cy - hh + 27],
+        [cx + hw - 5,  cy + 4],
+        [cx - hw + 5,  cy + 4],
+    ], dtype=np.int32)
+    cv2.fillPoly(canvas, [roof], COL_EGO_ACCENT)
+
+    # ── Rear window ───────────────────────────────────────────────────────
+    rw = np.array([
+        [cx - hw + 6,  cy + 6],
+        [cx + hw - 6,  cy + 6],
+        [cx + hw - 4,  cy + 18],
+        [cx - hw + 4,  cy + 18],
+    ], dtype=np.int32)
+    cv2.fillPoly(canvas, [rw], COL_EGO_WINDOW)
+
+    # ── Side mirrors (small notches) ──────────────────────────────────────
+    cv2.line(canvas, (cx - hw - 2, cy - 10), (cx - hw - 5, cy - 8),
+             COL_EGO_OUTLINE, 2, cv2.LINE_AA)
+    cv2.line(canvas, (cx + hw + 2, cy - 10), (cx + hw + 5, cy - 8),
+             COL_EGO_OUTLINE, 2, cv2.LINE_AA)
+
+
+def _draw_front_car(canvas, cx, cy, colour=(80, 85, 165)):
+    """Draw a simple top-down car silhouette for a front-detected vehicle."""
+    w, h = 26, 18
+    hw, hh = w // 2, h // 2
+
+    # Rounded rectangle body
+    pts = np.array([
+        [cx - hw + 3, cy - hh],
+        [cx + hw - 3, cy - hh],
+        [cx + hw, cy - hh + 3],
+        [cx + hw, cy + hh - 3],
+        [cx + hw - 3, cy + hh],
+        [cx - hw + 3, cy + hh],
+        [cx - hw, cy + hh - 3],
+        [cx - hw, cy - hh + 3],
     ], dtype=np.int32)
     cv2.fillPoly(canvas, [pts], colour)
-    # Bright outline for glow feel
-    b, g, r = colour
-    bright = (min(255, b + 80), min(255, g + 80), min(255, r + 80))
-    cv2.polylines(canvas, [pts], True, bright, 1)
+
+    # Window strip
+    rw = int(hw * 0.55)
+    cv2.rectangle(canvas, (cx - rw, cy - hh + 3), (cx + rw, cy + hh - 3),
+                  (max(0, colour[0] - 25), max(0, colour[1] - 25), max(0, colour[2] - 35)),
+                  cv2.FILLED)
 
 
-def _draw_arrow(canvas, cx: int, cy: int, direction: str, colour):
-    """Draw a small directional arrow (← or →) in the adjacent lane."""
-    d  = -1 if direction == "left" else 1
-    x1 = cx - d * 7
-    x2 = cx + d * 7
-    # Shaft
-    cv2.line(canvas, (x1, cy), (x2, cy), colour, 1)
-    # Arrowhead
+def _draw_side_car(canvas, cx, cy, colour=(105, 105, 115)):
+    """Draw a small top-down car silhouette for a side-detected vehicle."""
+    w, h = 22, 16
+    hw, hh = w // 2, h // 2
+
+    # Rounded body
     pts = np.array([
-        [x2,         cy],
-        [x2 - d * 5, cy - 4],
-        [x2 - d * 5, cy + 4],
+        [cx - hw + 2, cy - hh],
+        [cx + hw - 2, cy - hh],
+        [cx + hw, cy - hh + 2],
+        [cx + hw, cy + hh - 2],
+        [cx + hw - 2, cy + hh],
+        [cx - hw + 2, cy + hh],
+        [cx - hw, cy + hh - 2],
+        [cx - hw, cy - hh + 2],
     ], dtype=np.int32)
     cv2.fillPoly(canvas, [pts], colour)
+
+    # Window strip
+    rw = int(hw * 0.5)
+    darker = (max(0, colour[0] - 25), max(0, colour[1] - 25), max(0, colour[2] - 25))
+    cv2.rectangle(canvas, (cx - rw, cy - hh + 3), (cx + rw, cy + hh - 3),
+                  darker, cv2.FILLED)
+
+
+def _draw_status_top(canvas, mw, front_proximity, departure_state):
+    """Draw proximity status icon at the top of the minimap panel."""
+    if front_proximity == _PROX_VERY_CLOSE:
+        label = "!!"
+        col = COL_WARNING
+        font_scale = 1.1
+    elif front_proximity == _PROX_CLOSE:
+        label = "!"
+        col = COL_CAUTION
+        font_scale = 1.1
+    else:
+        label = "--"
+        col = COL_TEXT_MAIN
+        font_scale = 0.9
+
+    ts = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)[0]
+    tx = (mw - ts[0]) // 2
+    cv2.putText(canvas, label, (tx, 38),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, col, 2, cv2.LINE_AA)
+
+    # Small label
+    unit = "PROXIMITY"
+    us = cv2.getTextSize(unit, cv2.FONT_HERSHEY_SIMPLEX, 0.28, 1)[0]
+    cv2.putText(canvas, unit, ((mw - us[0]) // 2, 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.28, COL_TEXT_DIM, 1, cv2.LINE_AA)

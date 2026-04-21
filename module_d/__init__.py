@@ -43,7 +43,7 @@ from .hud_colours        import (
     BOUNDARY_DASH_LENGTH,
     BOUNDARY_GAP_LENGTH,
 )
-from .lane_overlay       import draw_lane_fill
+from .lane_overlay       import draw_lane_lines
 from .boundary_renderer  import draw_boundaries
 from .status_hud         import draw_status_hud, STATE_LABELS
 from .guidance_banner    import draw_guidance_banner
@@ -56,7 +56,7 @@ __all__ = [
     "HUDPipeline",
 
     # Individual layer functions (for testing or custom pipelines)
-    "draw_lane_fill",
+    "draw_lane_lines",
     "draw_boundaries",
     "draw_status_hud",
     "draw_guidance_banner",

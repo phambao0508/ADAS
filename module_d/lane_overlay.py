@@ -1,176 +1,125 @@
 """
-Module D  —  Step D1: Lane Fill Overlay
-=========================================
-TASK
-----
-Draw a semi-transparent coloured fill over the ego-lane area on the frame.
-The colour changes based on the departure state from Module B.
+Module D  —  Step D1: Lane Line Mask Overlay  (SWEEPING TRAIL)
+===============================================================
+APPROACH
+--------
+Render each YOLO segmentation mask segment with a continuous
+bottom-to-top sweeping animation — the overlay progressively
+reveals from near the car upward, then resets and sweeps again.
 
-⚠️ CRITICAL: MODEL DOES NOT OUTPUT A LANE AREA MASK
-----------------------------------------------------
-The YOLO model detects LANE LINE MARKINGS (white line, yellow line) as
-segmentation masks. It does NOT produce a filled lane-area mask.
+The sweep creates a "car painting the road" effect: only the
+portion of the lane markings near the car's current position
+is strongly visible, with a gradient fade at the leading edge.
 
-Therefore the ego-lane fill polygon is constructed from the boundary
-POLYNOMIALS produced by Module A:
-  - Evaluate left_poly  at each row y from y_top to y_bottom
-  - Evaluate right_poly at each row y from y_top to y_bottom
-  - Connect these points into a closed polygon
-  - Fill with cv2.fillPoly()
-
-HOW THE FILL WORKS
-------------------
-    For y in range(y_top, y_bottom, step=1):
-        left_x  = polyval(left_poly,  y)
-        right_x = polyval(right_poly, y)
-
-    Polygon = left-column (top-to-bottom) + right-column (bottom-to-top)
-
-    overlay = frame.copy()
-    cv2.fillPoly(overlay, [polygon], colour)
-    output  = cv2.addWeighted(overlay, LANE_FILL_ALPHA,
-                               frame, 1.0 - LANE_FILL_ALPHA, 0)
-
-    → weights sum to 1.0, maintaining image brightness.
-      LANE_FILL_ALPHA = 0.38 → 38% fill colour + 62% original frame.
-      (The plan formula 'frame×1.0 + colour×0.38' is incorrect — would
-       overexpose to 1.38. The code is the correct implementation.)
-
-y_top and y_bottom
-------------------
-    y_top    = min(top end of left_pts, top end of right_pts)
-             = the highest reliable point in the visible lane
-    y_bottom = frame_height - 1   (car bonnet row)
-
-    If polynomials are None (lane not detected this frame), skip.
-
-INPUTS (from Module A LaneResult)
------------------------------------
-    frame      : np.ndarray (H, W, 3) BGR
-    left_poly  : np.ndarray [a,b,c] or None
-    right_poly : np.ndarray [a,b,c] or None
-    left_pts   : List of (y, x) inner-edge points
-    right_pts  : List of (y, x) inner-edge points
-    departure_state : str  (from Module B DepartureResult.state)
-    frame_h, frame_w : int
-
-OUTPUT
-------
-    np.ndarray (H, W, 3) — frame with lane fill overlaid
+Only the exact YOLO segmentation mask is rendered — no dilation
+or glow, so the overlay sits precisely on the lane markings.
 """
 
 import numpy as np
 import cv2
-from typing import List, Optional, Tuple
+from typing import Optional
 
-from .hud_colours import lane_fill_colour, LANE_FILL_ALPHA
+from .hud_colours import lane_fill_colour
 
 
-def draw_lane_fill(
+# ── Tuning constants ──────────────────────────────────────────────────────────
+CORE_ALPHA       = 0.70    # peak opacity of the lane overlay
+TRAIL_FADE_FRAC  = 0.25    # fraction of the revealed zone that has a gradient fade
+
+
+def draw_lane_lines(
     frame:           np.ndarray,
-    left_poly:       Optional[np.ndarray],
-    right_poly:      Optional[np.ndarray],
-    left_pts:        List[Tuple[int, int]],   # may include synthetic pts (for display only)
-    right_pts:       List[Tuple[int, int]],
+    left_mask:       Optional[np.ndarray],
+    right_mask:      Optional[np.ndarray],
     departure_state: str,
-    real_left_pts:   Optional[List[Tuple[int, int]]] = None,  # YOLO-only: used for y-range
-    real_right_pts:  Optional[List[Tuple[int, int]]] = None,
+    fill_progress:   float = 1.0,
 ) -> np.ndarray:
     """
-    Draw a semi-transparent coloured polygon over the ego lane area.
+    Draw lane-line mask segments with a sweeping bottom-to-top trail.
 
     Parameters
     ----------
-    frame           : BGR video frame
-    left_poly       : [a,b,c] left boundary polynomial, or None
-    right_poly      : [a,b,c] right boundary polynomial, or None
-    left_pts        : (y,x) points for left boundary — may be synthetic
-    right_pts       : (y,x) points for right boundary — may be synthetic
-    departure_state : held departure state string from Module B
-    real_left_pts   : YOLO-detected left pts only (no synthetic). Used for
-                      y-range so synthetic full-frame points do not push
-                      the fill outside the actual detected data range.
-    real_right_pts  : same, for right boundary
+    frame           : BGR video frame (H, W, 3)
+    left_mask       : (H, W) uint8 or None — ego-lane left boundary mask
+    right_mask      : (H, W) uint8 or None — ego-lane right boundary mask
+    departure_state : str — controls fill colour
+    fill_progress   : 0.0 → 1.0 — sweep position (0 = nothing, 1 = fully revealed)
+                      This value is managed by HUDPipeline and cycles continuously.
+
+    Returns
+    -------
+    np.ndarray — frame with lane-line mask overlay
     """
-    if left_poly is None or right_poly is None:
-        return frame   # cannot fill without both boundaries
+    if fill_progress <= 0.0:
+        return frame
+    if left_mask is None and right_mask is None:
+        return frame
 
     H, W = frame.shape[:2]
+    colour = lane_fill_colour(departure_state)
 
-    # ── y-range: use REAL (YOLO-detected) points only ─────────────────────
-    # Synthetic points span 0.35H → H and would push y_top far above the
-    # actual detection range, causing the polynomial to be evaluated in a
-    # region where it was never fitted → diverges, balloons, or floods.
-    rl_pts = real_left_pts  if real_left_pts  is not None else left_pts
-    rr_pts = real_right_pts if real_right_pts is not None else right_pts
+    # ── Combine both masks into one canvas ────────────────────────────────
+    combined = np.zeros((H, W), dtype=np.uint8)
+    if left_mask is not None:
+        combined = cv2.bitwise_or(combined, left_mask)
+    if right_mask is not None:
+        combined = cv2.bitwise_or(combined, right_mask)
 
-    yl = [y for (y, x) in rl_pts]
-    yr = [y for (y, x) in rr_pts]
-
-    UPWARD_MARGIN_PX   = 40
-    DOWNWARD_MARGIN_PX = 20
-
-    if yl and yr:
-        # Both sides detected this frame — use real data range
-        y_top    = max(max(min(yl), min(yr)) - UPWARD_MARGIN_PX, 0)
-        y_bottom = min(max(max(yl), max(yr)) + DOWNWARD_MARGIN_PX, int(H * 0.95))
-    elif yl:
-        # Only left detected — anchor to left, conservative right
-        y_top    = max(min(yl) - UPWARD_MARGIN_PX, 0)
-        y_bottom = min(max(yl) + DOWNWARD_MARGIN_PX, int(H * 0.95))
-    elif yr:
-        # Only right detected — anchor to right
-        y_top    = max(min(yr) - UPWARD_MARGIN_PX, 0)
-        y_bottom = min(max(yr) + DOWNWARD_MARGIN_PX, int(H * 0.95))
-    else:
-        # Neither side detected this frame (both using previous-frame polys).
-        # Use a default range in the lower half of the frame where lane lines
-        # are reliably within the polynomial's fitted region.
-        # The reference-row width check below will still reject a bad poly.
-        y_top    = int(0.45 * H)
-        y_bottom = int(0.90 * H)
-
-    y_bottom = min(y_bottom, H - 1)
-
-    # ── Hard width check at reference row (y = 0.85 × H) ──────────────────
-    # This is the most reliable point: always within the detection range,
-    # same row used by Module B for offset. Check BEFORE evaluating full range.
-    REF_Y        = int(0.85 * H)
-    MAX_FILL_PX  = int(0.50 * W)   # single lane ≤ 50% of frame width
-    MIN_FILL_PX  = 80
-    ref_left_x   = int(np.clip(np.polyval(left_poly,  REF_Y), 0, W - 1))
-    ref_right_x  = int(np.clip(np.polyval(right_poly, REF_Y), 0, W - 1))
-    ref_width    = ref_right_x - ref_left_x
-    if ref_width <= 0 or ref_width < MIN_FILL_PX or ref_width > MAX_FILL_PX:
-        return frame   # 2-lane span, inverted, or phantom — reject
-
-    # ── Evaluate polynomials at every row ──────────────────────────────────
-    y_range  = np.arange(y_top, y_bottom + 1)
-    if y_range.size == 0:
-        return frame
-    left_xs  = np.clip(np.polyval(left_poly,  y_range).astype(np.int32), 0, W - 1)
-    right_xs = np.clip(np.polyval(right_poly, y_range).astype(np.int32), 0, W - 1)
-
-    # ── Final sanity checks on the full polygon ────────────────────────────
-    lane_widths = right_xs - left_xs
-    if lane_widths.size == 0 or lane_widths.max() <= 0:
-        return frame
-    if lane_widths.max() < MIN_FILL_PX or lane_widths.max() > MAX_FILL_PX:
+    if combined.max() == 0:
         return frame
 
-    # ── Build closed polygon ───────────────────────────────────────────────
-    # Left column: top → bottom  (x, y)
-    left_col  = np.column_stack([left_xs,           y_range  ])
-    # Right column: bottom → top (x, y) — to close the polygon
-    right_col = np.column_stack([right_xs[::-1],    y_range[::-1]])
+    # ── Find the y-range of the mask ──────────────────────────────────────
+    rows_with_mask = np.where(combined.max(axis=1) > 0)[0]
+    if len(rows_with_mask) == 0:
+        return frame
 
-    polygon = np.vstack([left_col, right_col]).astype(np.int32)
+    y_top_mask    = int(rows_with_mask[0])
+    y_bottom_mask = int(rows_with_mask[-1])
+    mask_span     = y_bottom_mask - y_top_mask
 
-    # ── Alpha blend: draw fill onto a copy, then blend ────────────────────
-    colour  = lane_fill_colour(departure_state)
-    overlay = frame.copy()
-    cv2.fillPoly(overlay, [polygon], colour)
+    if mask_span <= 0:
+        return frame
 
-    blended = cv2.addWeighted(overlay, LANE_FILL_ALPHA, frame, 1.0 - LANE_FILL_ALPHA, 0)
-    return blended
+    progress = max(0.0, min(1.0, fill_progress))
 
+    # ── Compute the sweep threshold ───────────────────────────────────────
+    # y_threshold: the top-most y that is currently revealed
+    # Moves from y_bottom_mask (progress=0) up to y_top_mask (progress=1)
+    y_threshold = int(y_bottom_mask - progress * mask_span)
+
+    # Zero out everything above the threshold (not yet revealed)
+    combined[:y_threshold, :] = 0
+
+    if combined.max() == 0:
+        return frame
+
+    # ── Build a per-row alpha gradient for smooth leading-edge fade ────────
+    # Rows near y_threshold (the leading edge) fade in gradually
+    fade_rows = int(mask_span * TRAIL_FADE_FRAC)
+    if fade_rows < 1:
+        fade_rows = 1
+
+    alpha_map = np.ones((H,), dtype=np.float32)
+    for y in range(y_threshold, min(y_threshold + fade_rows, H)):
+        # Linear fade: 0 at threshold → 1 at threshold + fade_rows
+        t = (y - y_threshold) / fade_rows
+        alpha_map[y] = t
+
+    # ── Render with per-row alpha ─────────────────────────────────────────
+    mask_pixels = combined > 0
+    colour_arr = np.array(colour, dtype=np.float32)
+
+    # Build the tinted overlay
+    overlay = frame.astype(np.float32)
+    for y in range(y_threshold, y_bottom_mask + 1):
+        row_mask = mask_pixels[y]
+        if not row_mask.any():
+            continue
+        a = alpha_map[y] * CORE_ALPHA
+        overlay[y, row_mask] = (
+            overlay[y, row_mask] * (1.0 - a) + colour_arr * a
+        )
+
+    frame = np.clip(overlay, 0, 255).astype(np.uint8)
+
+    return frame

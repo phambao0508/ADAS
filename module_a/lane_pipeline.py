@@ -135,6 +135,11 @@ class LaneResult:
     real_left_pts:  List[Tuple[int, int]] = field(default_factory=list)
     real_right_pts: List[Tuple[int, int]] = field(default_factory=list)
 
+    # Raw YOLO segmentation masks (H, W) uint8 — used by mask-based fill.
+    # None when YOLO did not detect that side this frame.
+    left_mask:   Optional[np.ndarray] = None
+    right_mask:  Optional[np.ndarray] = None
+
     # Polynomial coefficients [a, b, c] for: x = a·y² + b·y + c
     left_poly:   Optional[np.ndarray] = None
     right_poly:  Optional[np.ndarray] = None
@@ -216,6 +221,10 @@ class LanePipeline:
 
         result.valid = True
 
+        # ── Store raw masks for mask-based fill (Module D) ────────────────
+        result.left_mask  = ego.left_mask
+        result.right_mask = ego.right_mask
+
         # ── A2: Scan segmentation masks for precise inner-edge points ─────
         left_pts, right_pts = extract_boundaries(ego.left_mask, ego.right_mask)
         result.left_pts  = left_pts
@@ -231,6 +240,14 @@ class LanePipeline:
         result.right_type = classify_line_type(
             right_pts, frame, self.h, ego.right_label
         )
+
+        # Override with detection count: multiple YOLO detections on the
+        # same side = dashed line (each dash is a separate detection).
+        # This is more reliable than brightness analysis on bright roads.
+        if ego.left_det_count >= 2:
+            result.left_type = "dashed"
+        if ego.right_det_count >= 2:
+            result.right_type = "dashed"
 
         # ── A4: Fit smooth quadratic polynomials ──────────────────────────
         left_poly  = fit_boundary_polynomial(left_pts,  self._prev_left_poly)
@@ -301,12 +318,13 @@ class LanePipeline:
         masks = []
         for i in range(raw_masks.shape[0]):
             # Resize from YOLO's internal resolution to original frame size
+            # Use INTER_LINEAR for smooth edges, then re-threshold at 0.5
             m = cv2.resize(
                 raw_masks[i],
                 (self.w, self.h),
-                interpolation=cv2.INTER_NEAREST,
+                interpolation=cv2.INTER_LINEAR,
             )
-            # Convert float 0/1 → uint8 0/255
-            masks.append((m * 255).astype(np.uint8))
+            # Convert float → clean binary uint8 (smooth contour edges)
+            masks.append(((m > 0.5).astype(np.uint8)) * 255)
 
         return detections, masks

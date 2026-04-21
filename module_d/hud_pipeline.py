@@ -1,34 +1,12 @@
 """
 Module D  —  HUD Pipeline (Orchestrator)
 =========================================
-Single entry point for Module D. Composites all rendering layers onto the
-frame in the correct order and returns the final annotated frame.
-
-RENDERING ORDER (D1 → D2 → D3 → D4 → D5 → D6 → D7)
-------------------------------------------------------
-    D1  Lane fill overlay        — bottom-most layer
-    D2  Boundary lines           — drawn ON TOP of the fill
-    D3  Status HUD bar           — top-right text panel
-    D4  Guidance banner          — center-top (only when guidance active)
-    D5  Mini-map                 — bottom-left schematic
-    D6  Telemetry panel          — bottom-right info panel  [NEW]
-    D7  Frame corner decorations — chrome corner brackets   [NEW]
-
-INPUTS
-------
-    frame        : np.ndarray (H, W, 3) — original BGR video frame
-    lane_result  : LaneResult      (from module_a)
-    dept_result  : DepartureResult (from module_b)
-    guid_result  : GuidanceResult  (from module_c)
-
-OUTPUT
-------
-    np.ndarray (H, W, 3) — fully annotated frame ready to write to MP4
+Single entry point for Module D.
 """
 
 import numpy as np
 
-from .lane_overlay       import draw_lane_fill
+from .lane_overlay       import draw_lane_lines
 from .boundary_renderer  import draw_boundaries
 from .status_hud         import draw_status_hud
 from .guidance_banner    import draw_guidance_banner
@@ -40,10 +18,17 @@ from .frame_decorations  import draw_frame_decorations
 class HUDPipeline:
     """
     Module D orchestrator — composites all HUD layers onto a video frame.
-
-    Stateless: no persistent state between frames.
-    Create ONE instance and call render() on every frame.
+    Tracks fill_progress for the bottom-to-top dash reveal animation.
     """
+
+    # Sweep speed: progress per frame
+    # 0.015 → ~67 frames → ~2.2 sec at 30fps for a full-height line
+    # Short dashed lines fill faster because their y-span is smaller
+    FILL_GROW_RATE   = 0.015
+    FILL_DECAY_RATE  = 0.03   # slow fade when lane lost
+
+    def __init__(self):
+        self._fill_progress = 0.0
 
     def render(
         self,
@@ -52,47 +37,31 @@ class HUDPipeline:
         dept_result,    # module_b.DepartureResult
         guid_result,    # module_c.GuidanceResult
     ) -> np.ndarray:
-        """
-        Composite all HUD layers and return the annotated frame.
-
-        Parameters
-        ----------
-        frame : np.ndarray (H, W, 3), BGR
-            Original video frame (not modified — a working copy is made).
-        lane_result : LaneResult from module_a
-        dept_result : DepartureResult from module_b
-        guid_result : GuidanceResult from module_c
-
-        Returns
-        -------
-        np.ndarray (H, W, 3) — fully rendered frame.
-        """
-        # Work on a copy so the original frame remains unmodified
+        """Composite all HUD layers and return the annotated frame."""
         out = frame.copy()
 
-        # ── D1: Lane fill (bottom-most layer) ────────────────────────────
-        out = draw_lane_fill(
+        # ── Update fill animation (grow and stay) ─────────────────────────
+        lane_detected = (lane_result.left_mask is not None or
+                         lane_result.right_mask is not None)
+        if lane_detected:
+            # Grow toward 1.0 and clamp — no reset
+            # Long lines take the full ~2.2s to reveal; short lines
+            # appear faster because their mask y-span is smaller
+            self._fill_progress = min(1.0, self._fill_progress + self.FILL_GROW_RATE)
+        else:
+            # Slowly fade out when lanes are lost
+            self._fill_progress = max(0.0, self._fill_progress - self.FILL_DECAY_RATE)
+
+        # ── D1: Lane line dashes (bottom-most layer) ──────────────────────
+        out = draw_lane_lines(
             out,
-            lane_result.left_poly,
-            lane_result.right_poly,
-            lane_result.left_pts,
-            lane_result.right_pts,
+            lane_result.left_mask,
+            lane_result.right_mask,
             dept_result.state,
-            real_left_pts  = lane_result.real_left_pts,
-            real_right_pts = lane_result.real_right_pts,
+            fill_progress = self._fill_progress,
         )
 
-        # ── D2: Boundary lines ────────────────────────────────────────────
-        out = draw_boundaries(
-            out,
-            lane_result.left_poly,
-            lane_result.right_poly,
-            lane_result.left_pts,
-            lane_result.right_pts,
-            lane_result.left_type,
-            lane_result.right_type,
-            dept_result.state,
-        )
+        # ── D2: Boundary lines — DISABLED ─────────────────────────────────
 
         # ── D3: Departure status HUD (top-right) ──────────────────────────
         out = draw_status_hud(
@@ -118,7 +87,7 @@ class HUDPipeline:
             guid_result.right_clear,
             lane_result.left_type,
             lane_result.right_type,
-            guid_result.guidance,          # NEW: for guidance arrows
+            guid_result.guidance,
         )
 
         # ── D6: Telemetry panel (bottom-right) ────────────────────────────
