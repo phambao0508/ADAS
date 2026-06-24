@@ -35,52 +35,49 @@ import numpy as np
 import cv2
 from typing import Optional
 
-from .hud_colours import lane_fill_colour, DEPARTURE_COLOURS
+from .hud_colours import (
+    lane_fill_colour,
+    DEPARTURE_COLOURS,
+    MAP_BG_TOP, MAP_BG_BOT, MAP_ROAD_FILL,
+    MAP_LANE_LINE, MAP_LANE_SOLID, MAP_EGO_LANE_FILL, MAP_CENTRELINE,
+    MAP_CONE_FILL, MAP_CONE_EDGE,
+    MAP_EGO_BODY, MAP_EGO_ACCENT, MAP_EGO_WINDOW, MAP_EGO_OUTLINE,
+    MAP_OBJ_FRONT, MAP_OBJ_SIDE,
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_BRAND,
+    COLOUR_DEPART, COLOUR_WARN,
+)
 
+_PROX_DETECTED    = "DETECTED"
 _PROX_CLOSE       = "CLOSE"
 _PROX_VERY_CLOSE  = "VERY_CLOSE"
 
 
 # ── Mini-map panel dimensions ────────────────────────────────────────────
-MAP_WIDTH   = 220    # px
-MAP_HEIGHT  = 340    # px  (taller for perspective road)
+MAP_WIDTH   = 230    # px
+MAP_HEIGHT  = 320    # px
 MAP_MARGIN  = 14     # px from bottom-left corner
 CORNER_RAD  = 18     # rounded corner radius
 
-# ── Colours (BGR) ─────────────────────────────────────────────────────────
-# Background: soft muted blue-gray  (#bcc6cc ≈ BGR 204, 198, 188)
-COL_BG_TOP      = (212, 208, 200)   # lighter top
-COL_BG_BOT      = (200, 196, 188)   # slightly darker bottom
-
-# Road / asphalt
-COL_ROAD_FILL   = (185, 182, 178)   # warm gray road
-
-# Lane lines
-COL_LANE_LINE   = (175, 130,  60)   # medium blue lane lines (BGR)
-COL_LANE_SOLID  = (165, 120,  50)   # slightly darker for solid
-
-# Detection cone: teal/cyan
-COL_CONE_FILL   = (195, 205, 160)   # soft teal
-COL_CONE_EDGE   = (180, 190, 120)   # teal edge
-
-# Ego vehicle
-COL_EGO_BODY    = (240, 240, 240)   # white/silver
-COL_EGO_ACCENT  = (200, 200, 205)   # subtle metallic accent
-COL_EGO_WINDOW  = (185, 180, 150)   # blue-tint windshield
-COL_EGO_OUTLINE = (180, 180, 185)   # subtle outline
-
-# Detected objects
-COL_OBJ_CAR     = ( 80,  85, 165)   # red-ish silhouette for front car
-COL_OBJ_SIDE    = (105, 105, 115)   # dark gray for side vehicles
-
-# Text
-COL_TEXT_MAIN    = ( 45,  45,  45)   # dark text
-COL_TEXT_DIM     = (120, 120, 120)   # dim labels
-COL_TEXT_BRAND   = (155, 155, 155)   # branding
-
-# Warning states
-COL_WARNING      = ( 55,  75, 215)  # red warning
-COL_CAUTION      = ( 45, 130, 220)  # orange caution
+# ── Local aliases onto the central theme ─────────────────────────────────
+COL_BG_TOP        = MAP_BG_TOP
+COL_BG_BOT        = MAP_BG_BOT
+COL_ROAD_FILL     = MAP_ROAD_FILL
+COL_LANE_LINE     = MAP_LANE_LINE
+COL_LANE_SOLID    = MAP_LANE_SOLID
+COL_EGO_LANE_FILL = MAP_EGO_LANE_FILL
+COL_CONE_FILL     = MAP_CONE_FILL
+COL_CONE_EDGE     = MAP_CONE_EDGE
+COL_EGO_BODY      = MAP_EGO_BODY
+COL_EGO_ACCENT    = MAP_EGO_ACCENT
+COL_EGO_WINDOW    = MAP_EGO_WINDOW
+COL_EGO_OUTLINE   = MAP_EGO_OUTLINE
+COL_OBJ_CAR       = MAP_OBJ_FRONT
+COL_OBJ_SIDE      = MAP_OBJ_SIDE
+COL_TEXT_MAIN     = TEXT_PRIMARY
+COL_TEXT_DIM      = TEXT_SECONDARY
+COL_TEXT_BRAND    = TEXT_BRAND
+COL_WARNING       = COLOUR_DEPART
+COL_CAUTION       = COLOUR_WARN
 
 
 def draw_mini_map(
@@ -129,10 +126,20 @@ def draw_mini_map(
     left_ego_x  = road_bl_x + int(road_w_bot * 0.33)
     right_ego_x = road_bl_x + int(road_w_bot * 0.67)
 
+    _draw_ego_lane_fill(
+        canvas,
+        vp_x,
+        vp_y,
+        left_ego_x,
+        right_ego_x,
+        road_bot_y,
+        departure_state,
+    )
+
     _draw_persp_line(canvas, vp_x, vp_y, left_ego_x,  road_bot_y, left_type,
-                     COL_LANE_LINE, departure_state, "left",  thickness=2)
+                     COL_LANE_SOLID, departure_state, "left",  thickness=3)
     _draw_persp_line(canvas, vp_x, vp_y, right_ego_x, road_bot_y, right_type,
-                     COL_LANE_LINE, departure_state, "right", thickness=2)
+                     COL_LANE_SOLID, departure_state, "right", thickness=3)
 
     # Outer lane lines (dimmer, thinner)
     outer_col = tuple(min(255, c + 40) for c in COL_LANE_LINE)
@@ -146,9 +153,16 @@ def draw_mini_map(
 
     # ── Detected objects ──────────────────────────────────────────────────
     # Front vehicle
-    if front_proximity in (_PROX_CLOSE, _PROX_VERY_CLOSE):
-        fv_y = int(mh * 0.35) if front_proximity == _PROX_VERY_CLOSE else int(mh * 0.26)
-        col = COL_WARNING if front_proximity == _PROX_VERY_CLOSE else COL_OBJ_CAR
+    if front_proximity in (_PROX_DETECTED, _PROX_CLOSE, _PROX_VERY_CLOSE):
+        if front_proximity == _PROX_VERY_CLOSE:
+            fv_y = int(mh * 0.35)
+            col = COL_WARNING
+        elif front_proximity == _PROX_CLOSE:
+            fv_y = int(mh * 0.26)
+            col = COL_OBJ_CAR
+        else:  # DETECTED - far away, near the top of the cone
+            fv_y = int(mh * 0.19)
+            col = COL_TEXT_DIM
         _draw_front_car(canvas, vp_x, fv_y, colour=col)
 
     # Side objects (vehicles in adjacent lanes)
@@ -205,13 +219,13 @@ def draw_mini_map(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _draw_gradient_bg(canvas, mw, mh):
-    """Vertical gradient from light to slightly less light."""
-    for y in range(mh):
-        t = y / max(1, mh - 1)
-        b = int(COL_BG_TOP[0] * (1 - t) + COL_BG_BOT[0] * t)
-        g = int(COL_BG_TOP[1] * (1 - t) + COL_BG_BOT[1] * t)
-        r = int(COL_BG_TOP[2] * (1 - t) + COL_BG_BOT[2] * t)
-        canvas[y, :] = (b, g, r)
+    """Vertical gradient from light to slightly less light — VECTORISED."""
+    top = np.array(COL_BG_TOP, dtype=np.float32)
+    bot = np.array(COL_BG_BOT, dtype=np.float32)
+    # Build (mh, 1, 3) gradient in one shot via linspace
+    t = np.linspace(0.0, 1.0, mh, dtype=np.float32).reshape(mh, 1, 1)
+    gradient = (top * (1.0 - t) + bot * t).astype(np.uint8)  # (mh, 1, 3)
+    canvas[:] = gradient  # broadcasts across width
 
 
 def _rounded_rect_mask(w, h, r):
@@ -226,6 +240,31 @@ def _rounded_rect_mask(w, h, r):
     return mask
 
 
+def _draw_ego_lane_fill(canvas, vp_x, vp_y, left_bot_x, right_bot_x, bot_y, departure_state):
+    """Fill the ego lane area in the minimap."""
+    colour = lane_fill_colour(departure_state)
+    fill_colour = tuple(int(0.55 * COL_EGO_LANE_FILL[i] + 0.45 * colour[i]) for i in range(3))
+    top_y = vp_y + 18
+    left_top_x = int(vp_x + (left_bot_x - vp_x) * 0.12)
+    right_top_x = int(vp_x + (right_bot_x - vp_x) * 0.12)
+    pts = np.array([
+        [left_top_x, top_y],
+        [right_top_x, top_y],
+        [right_bot_x, bot_y],
+        [left_bot_x, bot_y],
+    ], dtype=np.int32)
+
+    overlay = canvas.copy()
+    cv2.fillPoly(overlay, [pts], fill_colour)
+    cv2.addWeighted(overlay, 0.36, canvas, 0.64, 0, canvas)
+
+    center_pts = np.array([
+        [vp_x, top_y],
+        [(left_bot_x + right_bot_x) // 2, bot_y],
+    ], dtype=np.int32).reshape(-1, 1, 2)
+    cv2.polylines(canvas, [center_pts], False, MAP_CENTRELINE, 1, cv2.LINE_AA)
+
+
 def _draw_persp_line(canvas, vp_x, vp_y, bot_x, bot_y,
                      line_type, colour, departure_state, side, thickness=1):
     """Draw a lane line from vanishing point to bottom in perspective."""
@@ -238,16 +277,12 @@ def _draw_persp_line(canvas, vp_x, vp_y, bot_x, bot_y,
         cv2.line(canvas, (vp_x, vp_y), (bot_x, bot_y), colour, thickness, cv2.LINE_AA)
     else:
         # Dashed — segments get larger toward the bottom (perspective)
-        n = 14
-        for i in range(n):
-            t1 = i / n
-            t2 = (i + 0.5) / n
-            if i % 2 == 0:
-                x1 = int(vp_x + (bot_x - vp_x) * t1)
-                y1 = int(vp_y + (bot_y - vp_y) * t1)
-                x2 = int(vp_x + (bot_x - vp_x) * t2)
-                y2 = int(vp_y + (bot_y - vp_y) * t2)
-                cv2.line(canvas, (x1, y1), (x2, y2), colour, thickness, cv2.LINE_AA)
+        for t1, t2 in ((0.18, 0.25), (0.32, 0.42), (0.50, 0.63), (0.72, 0.90)):
+            x1 = int(vp_x + (bot_x - vp_x) * t1)
+            y1 = int(vp_y + (bot_y - vp_y) * t1)
+            x2 = int(vp_x + (bot_x - vp_x) * t2)
+            y2 = int(vp_y + (bot_y - vp_y) * t2)
+            cv2.line(canvas, (x1, y1), (x2, y2), colour, thickness, cv2.LINE_AA)
 
 
 def _draw_detection_cone(canvas, mw, mh):
@@ -270,11 +305,11 @@ def _draw_detection_cone(canvas, mw, mh):
     # Semi-transparent fill
     overlay = canvas.copy()
     # Soft teal-cyan   (BGR ≈ 200, 210, 170)
-    cv2.fillPoly(overlay, [pts], (200, 210, 170))
-    cv2.addWeighted(overlay, 0.35, canvas, 0.65, 0, canvas)
+    cv2.fillPoly(overlay, [pts], COL_CONE_FILL)
+    cv2.addWeighted(overlay, 0.30, canvas, 0.70, 0, canvas)
 
     # Edge lines
-    edge = (175, 190, 130)
+    edge = COL_CONE_EDGE
     cv2.line(canvas, (cx - bot_hw, ego_y), (cx - top_hw, cone_top_y), edge, 1, cv2.LINE_AA)
     cv2.line(canvas, (cx + bot_hw, ego_y), (cx + top_hw, cone_top_y), edge, 1, cv2.LINE_AA)
     # Top arc
@@ -416,6 +451,10 @@ def _draw_status_top(canvas, mw, front_proximity, departure_state):
         label = "!"
         col = COL_CAUTION
         font_scale = 1.1
+    elif front_proximity == _PROX_DETECTED:
+        label = ".."
+        col = COL_TEXT_DIM
+        font_scale = 0.9
     else:
         label = "--"
         col = COL_TEXT_MAIN

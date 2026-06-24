@@ -31,7 +31,15 @@ import numpy as np
 import cv2
 from typing import Optional
 
-from .hud_colours import lane_fill_colour, HUD_BG_ALPHA, DEPARTURE_COLOURS
+from .hud_colours import (
+    lane_fill_colour, HUD_BG_ALPHA, DEPARTURE_COLOURS,
+    COLOUR_CENTERED, PANEL_TINT_DEFAULT, BRACKET_COLOUR,
+    TEXT_PRIMARY, TEXT_SECONDARY,
+)
+from .hud_effects import draw_glass_panel, ColourSmoother
+
+# Module-level colour smoother for smooth state transitions
+_state_colour_smoother = ColourSmoother(speed=0.18, initial=COLOUR_CENTERED)
 
 
 # ── HUD text per state ────────────────────────────────────────────────────
@@ -55,8 +63,8 @@ FONT             = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE_BIG   = 0.72  # was 0.52
 FONT_SCALE_SMALL = 0.50  # was 0.38
 FONT_THICKNESS_MAIN = 2  # was 1
-TEXT_COLOUR      = (230, 230, 230)   # off-white
-TEXT_COLOUR_DIM  = (130, 150, 170)   # dim blue-grey for sub-line
+TEXT_COLOUR      = TEXT_PRIMARY
+TEXT_COLOUR_DIM  = TEXT_SECONDARY
 
 
 def draw_status_hud(
@@ -85,12 +93,12 @@ def draw_status_hud(
     x2 = W - HUD_MARGIN_RIGHT
     y2 = y1 + HUD_HEIGHT
 
-    state_colour = DEPARTURE_COLOURS.get(departure_state, (74, 200, 0))
+    target_colour = DEPARTURE_COLOURS.get(departure_state, COLOUR_CENTERED)
+    state_colour = _state_colour_smoother.update(target_colour)
 
-    # ── 1. Semi-transparent dark background ───────────────────────────────
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (x1, y1), (x2, y2), (12, 16, 22), cv2.FILLED)
-    frame = cv2.addWeighted(overlay, HUD_BG_ALPHA, frame, 1.0 - HUD_BG_ALPHA, 0)
+    # ── 1. Glassmorphism background ───────────────────────────────────────
+    frame = draw_glass_panel(frame, x1, y1, x2, y2,
+                             tint_bgr=PANEL_TINT_DEFAULT, blur_k=21, alpha=0.70)
 
     # ── 2. Outer border matching state colour (dim version) ───────────────
     b, g, r = state_colour
@@ -102,7 +110,7 @@ def draw_status_hud(
 
     # ── 4. Corner bracket details (top-left and bottom-right only) ─────────
     brk = 8   # bracket length
-    brk_clr = (120, 150, 200)
+    brk_clr = BRACKET_COLOUR
     # top-right corner of panel
     cv2.line(frame, (x2 - brk, y1), (x2, y1), brk_clr, 1)
     cv2.line(frame, (x2, y1), (x2, y1 + brk), brk_clr, 1)

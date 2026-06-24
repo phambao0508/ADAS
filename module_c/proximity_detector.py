@@ -35,7 +35,7 @@ Each vehicle box is tested through three gates IN ORDER:
 
     relative_area > 0.06  →  PROX_VERY_CLOSE  (~10–20 m, emergency)
     relative_area > 0.02  →  PROX_CLOSE       (~20–40 m, guidance range)
-    relative_area ≤ 0.02  →  ignored          (FAR, no action needed)
+    relative_area ≤ 0.02  →  PROX_DETECTED    (detected but far, >40 m)
 
 MULTI-VEHICLE RULE
 ------------------
@@ -50,7 +50,7 @@ after a closer one.
 
 DISTANCE PROXY TABLE (sedan-sized vehicle, 1080p, ~70° FOV)
 ------------------------------------------------------------
-  relative_area ≈ 0.01  →  ~60 m ahead  (ignored)
+  relative_area ≈ 0.01  →  ~60 m ahead  (DETECTED)
   relative_area ≈ 0.02  →  ~40 m ahead  (CLOSE threshold)
   relative_area ≈ 0.04  →  ~25 m ahead  (CLOSE)
   relative_area ≈ 0.06  →  ~15 m ahead  (VERY_CLOSE threshold)
@@ -65,12 +65,12 @@ INPUTS
 
 OUTPUT
 ------
-  str : PROX_NONE | PROX_CLOSE | PROX_VERY_CLOSE
+  str : PROX_NONE | PROX_DETECTED | PROX_CLOSE | PROX_VERY_CLOSE
 """
 
 from typing import List, Tuple
 
-from .guidance_states import PROX_NONE, PROX_CLOSE, PROX_VERY_CLOSE
+from .guidance_states import PROX_NONE, PROX_DETECTED, PROX_CLOSE, PROX_VERY_CLOSE
 
 
 # ── Tuning constants ───────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ def detect_front_proximity(
 
     Returns
     -------
-    str : one of PROX_NONE, PROX_CLOSE, PROX_VERY_CLOSE
+    str : one of PROX_NONE, PROX_DETECTED, PROX_CLOSE, PROX_VERY_CLOSE
     """
     frame_area    = frame_w * frame_h
     front_gate_y  = FRONT_GATE_Y_FRAC * frame_h
@@ -134,5 +134,9 @@ def detect_front_proximity(
             # Guidance range — record but keep searching for a closer vehicle
             proximity = PROX_CLOSE
             # (PROX_VERY_CLOSE check above already handles the upgrade)
+
+        elif proximity not in (PROX_CLOSE, PROX_VERY_CLOSE):
+            # Vehicle is in ego lane and ahead but far — mark as detected
+            proximity = PROX_DETECTED
 
     return proximity

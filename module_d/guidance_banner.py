@@ -23,6 +23,10 @@ import numpy as np
 import cv2
 
 from .hud_colours import GUIDANCE_COLOURS, HUD_BG_ALPHA
+from .hud_effects import draw_glass_panel, pulse_brightness
+
+# Frame counter for pulse animation (incremented each call)
+_frame_counter = 0
 
 
 # ── Layout constants ────────────────────────────────────────────
@@ -55,6 +59,9 @@ def draw_guidance_banner(
     -------
     np.ndarray : frame with banner (or unchanged if GUIDE_NONE)
     """
+    global _frame_counter
+    _frame_counter += 1
+
     if guidance_state == "GUIDE_NONE" or not message:
         return frame   # nothing to draw
 
@@ -79,16 +86,13 @@ def draw_guidance_banner(
     state_colour = GUIDANCE_COLOURS.get(guidance_state, (180, 180, 180))
     b, g, r = state_colour
 
-    # ── 1. Background: dark semi-transparent rect ──────────────────────────
-    overlay = frame.copy()
+    # ── 1. Glassmorphism background ────────────────────────────────────────
     if is_urgent:
-        # Urgent: slightly reddish background fill
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (20, 10, 40), cv2.FILLED)
-        alpha_bg = 0.88
+        frame = draw_glass_panel(frame, x1, y1, x2, y2,
+                                 tint_bgr=(20, 10, 40), blur_k=21, alpha=0.85)
     else:
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (10, 14, 22), cv2.FILLED)
-        alpha_bg = HUD_BG_ALPHA
-    frame = cv2.addWeighted(overlay, alpha_bg, frame, 1.0 - alpha_bg, 0)
+        frame = draw_glass_panel(frame, x1, y1, x2, y2,
+                                 tint_bgr=(10, 14, 22), blur_k=21, alpha=0.70)
 
     # ── 2. Outer glow ring (dim, 1px wider) ───────────────────────────────
     glow_clr = (int(b * 0.35), int(g * 0.35), int(r * 0.35))
@@ -127,9 +131,10 @@ def draw_guidance_banner(
     cv2.putText(frame, message, (text_x, text_y),
                 FONT, font_scale, state_colour, font_thick, cv2.LINE_AA)
 
-    # Extra bright highlight for urgent (second pass, slightly lighter)
+    # Extra bright highlight for urgent (pulsing animation)
     if is_urgent:
-        highlight = (min(255, b + 80), min(255, g + 80), min(255, r + 80))
+        highlight = pulse_brightness(state_colour, _frame_counter,
+                                     amplitude=50, period_frames=15)
         cv2.putText(frame, message, (text_x, text_y),
                     FONT, font_scale, highlight, 1, cv2.LINE_AA)
 

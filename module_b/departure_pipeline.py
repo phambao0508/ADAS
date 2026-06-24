@@ -122,12 +122,15 @@ class DeparturePipeline:
         result = DepartureResult()
 
         # ── B1: Compute raw lateral offset ───────────────────────────────
-        raw_offset = compute_lateral_offset(
-            lane_result.left_poly,
-            lane_result.right_poly,
-            self.w,
-            self.h,
-        )
+        if getattr(lane_result, "valid", True):
+            raw_offset = compute_lateral_offset(
+                lane_result.left_poly,
+                lane_result.right_poly,
+                self.w,
+                self.h,
+            )
+        else:
+            raw_offset = None
         result.raw_offset = raw_offset
 
         # ── B1b: Auto mount-bias correction ─────────────────────────────

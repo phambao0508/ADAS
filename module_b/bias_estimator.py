@@ -36,8 +36,8 @@ rather than locking to a stale from the start of the video.
 
 PARAMETERS
 ----------
-  WARMUP_SAMPLES  = 90   — frames before bias correction activates
-                           (3 s at 30 fps). During warmup: no correction.
+  WARMUP_SAMPLES  = 15   — frames before bias correction activates
+                           (~0.5 s at 30 fps). During warmup: no correction.
   WINDOW_SIZE     = 300  — rolling window length (10 s at 30 fps).
                            Bias is recomputed each frame from this window.
   MAX_BIAS_PX     = 200  — safety clamp: never subtract more than this.
@@ -58,9 +58,11 @@ import numpy as np
 
 
 # ── Tuning constants ───────────────────────────────────────────────────────
-WARMUP_SAMPLES = 90     # frames before correction activates  (~3 s @ 30 fps)
+WARMUP_SAMPLES = 15     # frames before correction activates  (~0.5 s @ 30 fps)
 WINDOW_SIZE    = 300    # rolling window size                 (~10 s @ 30 fps)
 MAX_BIAS_PX    = 200    # maximum bias correction (px) — safety clamp
+MAX_SAMPLE_ABS_PX = 260  # ignore impossible offset samples for bias learning
+MAX_CORRECTED_ABS_PX = 120  # reject lane-pair jumps after calibration
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -87,10 +89,14 @@ class MountBiasEstimator:
         warmup_samples: int = WARMUP_SAMPLES,
         window_size:    int = WINDOW_SIZE,
         max_bias_px:    float = MAX_BIAS_PX,
+        max_sample_abs_px: float = MAX_SAMPLE_ABS_PX,
+        max_corrected_abs_px: float = MAX_CORRECTED_ABS_PX,
     ):
         self._warmup   = warmup_samples
         self._window   = deque(maxlen=window_size)
         self._max_bias = max_bias_px
+        self._max_sample_abs = max_sample_abs_px
+        self._max_corrected_abs = max_corrected_abs_px
         self._bias: float = 0.0          # current estimated mount bias (px)
         self._ready: bool = False        # True once warmup samples collected
 
@@ -113,8 +119,11 @@ class MountBiasEstimator:
         if raw_offset is None:
             return None
 
-        # Add to rolling window
-        self._window.append(raw_offset)
+        # Add only plausible samples to the bias window. Very large offsets
+        # are usually bad lane-pair fits or actual manoeuvres; learning them
+        # as camera bias would hide real departures later.
+        if abs(raw_offset) <= self._max_sample_abs:
+            self._window.append(raw_offset)
 
         # Update bias estimate once we have enough samples
         if len(self._window) >= self._warmup:
@@ -127,7 +136,10 @@ class MountBiasEstimator:
             # Warmup phase: no correction yet — pass through raw
             return raw_offset
 
-        return raw_offset - self._bias
+        corrected = raw_offset - self._bias
+        if abs(corrected) > self._max_corrected_abs:
+            return None
+        return corrected
 
     # ─────────────────────────────────────────────────────────────────────
     def reset(self):

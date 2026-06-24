@@ -49,10 +49,18 @@ Model Constraints
 """
 
 from .guidance_pipeline import GuidancePipeline, GuidanceResult, VEHICLE_CLASSES
+from .vehicle_tracker   import VehicleTracker, Track, TENTATIVE, CONFIRMED
+from .camera_calibration import CameraIntrinsics, REAL_VEHICLE_WIDTHS_M
+from .distance_estimator import (
+    DistanceTTCEstimator,
+    estimate_distance,
+    pinhole_distance,
+    width_distance,
+)
 from .guidance_states   import (
     GUIDE_NONE, GUIDE_LEFT, GUIDE_RIGHT, GUIDE_BOTH, GUIDE_SLOW, GUIDE_URGENT,
     ACTIVE_GUIDE_STATES, GUIDE_MESSAGES,
-    PROX_NONE, PROX_CLOSE, PROX_VERY_CLOSE,
+    PROX_NONE, PROX_DETECTED, PROX_CLOSE, PROX_VERY_CLOSE,
 )
 from .zone_definer      import compute_zone_dividers, assign_zone, ZONE_REF_Y_FRAC
 from .proximity_detector import detect_front_proximity, FRONT_GATE_Y_FRAC, PROXIMITY_CLOSE, PROXIMITY_VERY_CLOSE
@@ -64,6 +72,20 @@ __all__ = [
     # Pipeline (main entry point)
     "GuidancePipeline",
     "GuidanceResult",
+
+    # Vehicle tracker
+    "VehicleTracker",
+    "Track",
+    "TENTATIVE",
+    "CONFIRMED",
+
+    # Distance + TTC
+    "CameraIntrinsics",
+    "DistanceTTCEstimator",
+    "estimate_distance",
+    "pinhole_distance",
+    "width_distance",
+    "REAL_VEHICLE_WIDTHS_M",
 
     # Sub-components (for testing or direct use)
     "compute_zone_dividers",
@@ -85,6 +107,7 @@ __all__ = [
 
     # Proximity sub-state constants
     "PROX_NONE",
+    "PROX_DETECTED",
     "PROX_CLOSE",
     "PROX_VERY_CLOSE",
 

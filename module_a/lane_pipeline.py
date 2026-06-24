@@ -1,85 +1,64 @@
 """
-Module A  —  Lane Pipeline (Orchestrator)  — SEGMENTATION MODEL VERSION
-========================================================================
+Module A  —  Lane Pipeline (Orchestrator)  — UFLDv2 VERSION
+=============================================================
 TASK
 ----
-Single entry point for Module A. Runs A1 → A5 per frame.
+Single entry point for Module A. Runs A1 → A4 per frame using
+UFLDv2 lane coordinates instead of YOLO segmentation masks.
 
 PIPELINE FLOW
 -------------
     Input:
-      frame      — raw BGR dashcam frame (H×W×3)
-      yolo_result — ultralytics Results object from model(frame)[0]
+      frame       — raw BGR dashcam frame (H×W×3)
+      ufld_lanes  — List[List[Tuple[int, int]]] from UFLDv2Wrapper.detect_lanes()
+                    Each lane is a list of (x, y) pixel coordinates.
 
-    Pre-processing (inside process()):
-      Extract boxes:  [x1, y1, x2, y2, conf, cls] per detection
-      Extract masks:  (H, W) uint8 binary mask per detection
-                      (resized from YOLO's internal resolution to frame size)
+    A1: select_ego_lane(ufld_lanes, W, H)
+        → EgoLaneLines(left_pts, right_pts, found)
 
-    A1: select_ego_lane(detections, masks, W, H)
-        → EgoLaneLines(left_det, right_det, left_mask, right_mask,
-                        left_label, right_label, found)
+    A2: extract_boundaries(left_pts, right_pts)
+        → left_pts, right_pts  (validated and sorted)
 
-    A2: extract_boundaries(left_mask, right_mask)
-        → left_pts, right_pts  (inner-edge pixels from segmentation masks)
+    A3: (removed — lane type always defaults to "solid")
 
-    A3: classify_line_type(left_pts,  frame, H, left_label)
-        classify_line_type(right_pts, frame, H, right_label)
-        → left_type, right_type  ("solid" or "dashed")
-
-    A4: fit_boundary_polynomial(left_pts,  prev_left_poly)
+    A4: fit_boundary_polynomial(left_pts, prev_left_poly)
         fit_boundary_polynomial(right_pts, prev_right_poly)
         → left_poly, right_poly  (np.ndarray [a, b, c])
 
-    A5: bev.warp(frame)
-        → bev_frame  (top-down warped frame, for visualisation)
-
     Output: LaneResult dataclass
-
-HOW YOLO SEGMENTATION MASKS ARE EXTRACTED
-------------------------------------------
-    results = model(frame)[0]
-
-    boxes_data = results.boxes.data.cpu().numpy()      # (N, 6)
-    masks_data = results.masks.data.cpu().numpy()      # (N, mask_h, mask_w)
-
-    masks_data is at a lower internal resolution and must be resized to
-    the original frame size (H, W) using cv2.resize with INTER_NEAREST
-    so pixel values stay binary (0 or 1).
 
 USAGE EXAMPLE
 -------------
+    from ufld_wrapper import UFLDv2Wrapper
     from module_a import LanePipeline
 
+    ufld = UFLDv2Wrapper(model_path="culane_res18.pth")
     pipeline = LanePipeline(frame_width=1920, frame_height=1080)
 
     while cap.isOpened():
         ret, frame = cap.read()
-        yolo_result = yolo_model(frame)[0]
+        ufld_lanes = ufld.detect_lanes(frame)
 
-        result = pipeline.process(frame, yolo_result)
+        result = pipeline.process(frame, ufld_lanes)
 
         # result.left_poly    → [a,b,c] for left boundary curve
         # result.right_poly   → [a,b,c] for right boundary curve
-        # result.left_type    → "solid" or "dashed"
-        # result.right_type   → "solid" or "dashed"
-        # result.left_pts     → raw (y,x) inner-edge points, left line
-        # result.right_pts    → raw (y,x) inner-edge points, right line
+        # result.left_type    → always "solid" (UFLDv2 default)
+        # result.right_type   → always "solid"
+        # result.left_pts     → (y,x) inner-edge points, left line
+        # result.right_pts    → (y,x) inner-edge points, right line
         # result.valid        → False if no lane lines found this frame
 """
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
-import warnings
 
-import cv2
 import numpy as np
 
 from .ego_lane_selector    import select_ego_lane, EgoLaneLines
 from .boundary_extractor   import extract_boundaries
-from .line_type_classifier import classify_line_type
+
 from .poly_fitter          import fit_boundary_polynomial
-from .bev_transformer      import BEVTransformer
 
 
 def _synth_pts_from_poly(
@@ -92,7 +71,7 @@ def _synth_pts_from_poly(
     Generate sparse synthetic (y, x) boundary points by evaluating a
     polynomial across the frame height.
 
-    Used when YOLO misses a boundary for one or more frames: the renderer
+    Used when UFLDv2 misses a boundary for one or more frames: the renderer
     gets a full y-range from these synthetic points, so the boundary line
     and lane fill both extend correctly without gaps.
 
@@ -115,7 +94,6 @@ def _synth_pts_from_poly(
     return pts
 
 
-
 # ── Result dataclass ──────────────────────────────────────────────────────────
 @dataclass
 class LaneResult:
@@ -125,18 +103,16 @@ class LaneResult:
     """
     valid:       bool = False
 
-    # Raw boundary pixel lists: List of (y, x) tuples (inner edge of each line)
+    # Raw boundary pixel lists: List of (y, x) tuples
     left_pts:    List[Tuple[int, int]] = field(default_factory=list)
     right_pts:   List[Tuple[int, int]] = field(default_factory=list)
 
     # YOLO-detected-only points (no synthetic fill-in).
-    # Used for y-range calculation in the fill overlay so synthetic pts
-    # (which span the full frame) don't push y_top/y_bottom out of range.
+    # With UFLDv2, these are the raw UFLDv2 points before synthetic fill.
     real_left_pts:  List[Tuple[int, int]] = field(default_factory=list)
     real_right_pts: List[Tuple[int, int]] = field(default_factory=list)
 
-    # Raw YOLO segmentation masks (H, W) uint8 — used by mask-based fill.
-    # None when YOLO did not detect that side this frame.
+    # Raw segmentation masks — always None with UFLDv2 (no masks available)
     left_mask:   Optional[np.ndarray] = None
     right_mask:  Optional[np.ndarray] = None
 
@@ -144,24 +120,21 @@ class LaneResult:
     left_poly:   Optional[np.ndarray] = None
     right_poly:  Optional[np.ndarray] = None
 
-    # Lane marking type for each boundary
-    left_type:   str = "solid"    # "solid" or "dashed"
+    # Lane marking type for each boundary (always "solid" with UFLDv2)
+    left_type:   str = "solid"
     right_type:  str = "solid"
 
-    # Colour label from YOLO class
-    left_label:  Optional[str] = None    # "yellow" or "white"
+    # Colour label from YOLO class — always None with UFLDv2
+    left_label:  Optional[str] = None
     right_label: Optional[str] = None
-
-    # Bird's Eye View warped frame (for debugging / visualisation)
-    bev_frame:   Optional[np.ndarray] = None
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class LanePipeline:
     """
-    Module A orchestrator — runs A1 → A5 per frame.
+    Module A orchestrator — runs A1 → A4 per frame using UFLDv2 input.
 
-    Create ONE instance per video (BEV matrix pre-computed for frame size).
+    Create ONE instance per video.
     Call process() on every frame.
 
     Parameters
@@ -174,15 +147,94 @@ class LanePipeline:
         self.w = frame_width
         self.h = frame_height
 
-        # A5: BEV transformer — computed once
-        self.bev = BEVTransformer(frame_width, frame_height)
-
         # A4: remember last good polynomials for fallback
         self._prev_left_poly:  Optional[np.ndarray] = None
         self._prev_right_poly: Optional[np.ndarray] = None
+        self._prev_measure: Optional[Tuple[float, float]] = None
+        self._reject_streak = 0
+        self._max_reject_streak = 12
+
+    def _has_curve_signal(self, pts: List[Tuple[int, int]]) -> bool:
+        """Return True when points show a real bend rather than a near-line."""
+        if len(pts) < 6:
+            return False
+
+        ys = np.array([p[0] for p in pts], dtype=np.float64)
+        xs = np.array([p[1] for p in pts], dtype=np.float64)
+        if float(np.ptp(ys)) < self.h * 0.12:
+            return False
+
+        try:
+            poly = np.polyfit(ys, xs, 2)
+        except (np.linalg.LinAlgError, ValueError):
+            return False
+
+        y_top = float(np.min(ys))
+        y_bottom = float(np.max(ys))
+        y_mid = (y_top + y_bottom) * 0.5
+
+        x_top = float(np.polyval(poly, y_top))
+        x_mid = float(np.polyval(poly, y_mid))
+        x_bottom = float(np.polyval(poly, y_bottom))
+        x_mid_linear = (x_top + x_bottom) * 0.5
+
+        bow_px = abs(x_mid - x_mid_linear)
+        curvature_px = abs(float(poly[0])) * (y_bottom - y_top) ** 2
+        threshold = max(18.0, self.w * 0.012)
+        return bow_px > threshold or curvature_px > threshold
+
+    def _measure_pair(
+        self,
+        left_poly: Optional[np.ndarray],
+        right_poly: Optional[np.ndarray],
+    ) -> Optional[Tuple[float, float]]:
+        """Return lane centre/width for plausibility checks."""
+        if left_poly is None or right_poly is None:
+            return None
+
+        ref_y = self.h * 0.78
+        left_x = float(np.polyval(left_poly, ref_y))
+        right_x = float(np.polyval(right_poly, ref_y))
+        width = right_x - left_x
+        center = (left_x + right_x) * 0.5
+
+        min_width = max(120.0, self.w * 0.08)
+        max_width = self.w * 0.62
+        if width < min_width or width > max_width:
+            return None
+        if center < self.w * 0.22 or center > self.w * 0.78:
+            return None
+        return center, width
+
+    def _accept_measure(
+        self,
+        measure: Optional[Tuple[float, float]],
+        curve_responsive: bool = False,
+    ) -> bool:
+        """Reject sudden ego-lane jumps caused by a bad mask track."""
+        if measure is None:
+            return False
+        if self._prev_measure is None:
+            return True
+        if self._reject_streak >= self._max_reject_streak:
+            return True
+
+        center, width = measure
+        prev_center, prev_width = self._prev_measure
+        center_limit = 260.0 if curve_responsive else 140.0
+        width_limit = 320.0 if curve_responsive else 220.0
+        if abs(center - prev_center) > center_limit:
+            return False
+        if abs(width - prev_width) > width_limit:
+            return False
+        return True
 
     # ─────────────────────────────────────────────────────────────────────
-    def process(self, frame: np.ndarray, yolo_result) -> LaneResult:
+    def process(
+        self,
+        frame: np.ndarray,
+        ufld_lanes: List[List[Tuple[int, int]]],
+    ) -> LaneResult:
         """
         Run the full Module A pipeline on one video frame.
 
@@ -190,9 +242,9 @@ class LanePipeline:
         ----------
         frame : np.ndarray (H, W, 3)
             Original BGR dashcam frame.
-        yolo_result : ultralytics Results
-            Direct output of model(frame)[0].
-            Must contain both .boxes and .masks (segmentation model output).
+        ufld_lanes : List[List[Tuple[int, int]]]
+            Lane coordinates from UFLDv2Wrapper.detect_lanes().
+            Each lane is a list of (x, y) pixel coordinates.
 
         Returns
         -------
@@ -200,16 +252,13 @@ class LanePipeline:
         """
         result = LaneResult()
 
-        # ── Extract boxes and masks from YOLO result ──────────────────────
-        detections, masks = self._extract_from_yolo(yolo_result)
-
-        if not detections:
+        if not ufld_lanes:
             result.left_poly  = self._prev_left_poly
             result.right_poly = self._prev_right_poly
             return result
 
-        # ── A1: Find left/right ego-lane boundary detections + masks ──────
-        ego: EgoLaneLines = select_ego_lane(detections, masks, self.w, self.h)
+        # ── A1: Find left/right ego-lane boundaries ───────────────────────
+        ego: EgoLaneLines = select_ego_lane(ufld_lanes, self.w, self.h)
 
         result.left_label  = ego.left_label
         result.right_label = ego.right_label
@@ -221,110 +270,60 @@ class LanePipeline:
 
         result.valid = True
 
-        # ── Store raw masks for mask-based fill (Module D) ────────────────
-        result.left_mask  = ego.left_mask
-        result.right_mask = ego.right_mask
-
-        # ── A2: Scan segmentation masks for precise inner-edge points ─────
-        left_pts, right_pts = extract_boundaries(ego.left_mask, ego.right_mask)
+        # ── A2: Validate and sort boundary points ─────────────────────────
+        left_pts, right_pts = extract_boundaries(ego.left_pts, ego.right_pts)
         result.left_pts  = left_pts
         result.right_pts = right_pts
-        # Store real/YOLO-only points before synthetic substitution
+        # Store real points before synthetic substitution
         result.real_left_pts  = list(left_pts)
         result.real_right_pts = list(right_pts)
 
-        # ── A3: Classify solid vs. dashed ─────────────────────────────────
-        result.left_type  = classify_line_type(
-            left_pts,  frame, self.h, ego.left_label
-        )
-        result.right_type = classify_line_type(
-            right_pts, frame, self.h, ego.right_label
-        )
-
-        # Override with detection count: multiple YOLO detections on the
-        # same side = dashed line (each dash is a separate detection).
-        # This is more reliable than brightness analysis on bright roads.
-        if ego.left_det_count >= 2:
-            result.left_type = "dashed"
-        if ego.right_det_count >= 2:
-            result.right_type = "dashed"
+        # ── A3: Lane type — always "solid" (U-Net/UFLDv2 cannot classify) ─
+        # LaneResult defaults to "solid" already, no action needed.
 
         # ── A4: Fit smooth quadratic polynomials ──────────────────────────
-        left_poly  = fit_boundary_polynomial(left_pts,  self._prev_left_poly)
-        right_poly = fit_boundary_polynomial(right_pts, self._prev_right_poly)
+        curve_responsive = (
+            self._has_curve_signal(left_pts) or
+            self._has_curve_signal(right_pts)
+        )
+        left_poly = fit_boundary_polynomial(
+            left_pts,
+            self._prev_left_poly,
+            curve_responsive=curve_responsive,
+        )
+        right_poly = fit_boundary_polynomial(
+            right_pts,
+            self._prev_right_poly,
+            curve_responsive=curve_responsive,
+        )
 
         result.left_poly  = left_poly
         result.right_poly = right_poly
 
-        if left_poly  is not None: self._prev_left_poly  = left_poly
-        if right_poly is not None: self._prev_right_poly = right_poly
+        measure = self._measure_pair(left_poly, right_poly)
+        if (
+            left_poly is not None and
+            right_poly is not None and
+            not self._accept_measure(measure, curve_responsive=curve_responsive)
+        ):
+            self._reject_streak += 1
+            result.valid = False
+            result.left_poly = self._prev_left_poly
+            result.right_poly = self._prev_right_poly
+            return result
 
-        # ── A4b: Synthesise pts for renderer when mask was empty ──────────
-        # If YOLO missed a boundary this frame but we have a poly from a
-        # previous frame, generate sparse synthetic pts from that poly so
-        # the renderer knows the correct y-range and draws the full line.
-        # This is what makes the boundary "connect" across gap frames.
+        if left_poly is not None:
+            self._prev_left_poly = left_poly
+        if right_poly is not None:
+            self._prev_right_poly = right_poly
+        if measure is not None:
+            self._prev_measure = measure
+            self._reject_streak = 0
+
+        # ── A4b: Synthesise pts when UFLDv2 missed a boundary ─────────────
         if not left_pts and left_poly is not None:
             result.left_pts = _synth_pts_from_poly(left_poly, self.h, self.w)
         if not right_pts and right_poly is not None:
             result.right_pts = _synth_pts_from_poly(right_poly, self.h, self.w)
 
-        # ── A5: Warp frame to BEV ─────────────────────────────────────────
-        result.bev_frame = self.bev.warp(frame)
-
         return result
-
-    # ─────────────────────────────────────────────────────────────────────
-    def _extract_from_yolo(self, yolo_result):
-        """
-        Extract bounding boxes and segmentation masks from a YOLO result.
-
-        Parameters
-        ----------
-        yolo_result : ultralytics Results object (model(frame)[0])
-
-        Returns
-        -------
-        detections : List of [x1, y1, x2, y2, conf, cls]  — one per detection
-        masks      : List of np.ndarray (H, W) uint8       — one per detection
-                     masks[i] corresponds to detections[i]
-                     Returns empty lists if no detections or no masks.
-        """
-        # ── Boxes ─────────────────────────────────────────────────────────
-        if yolo_result.boxes is None or len(yolo_result.boxes) == 0:
-            return [], []
-
-        detections = yolo_result.boxes.data.cpu().numpy().tolist()
-
-        # ── Segmentation masks ────────────────────────────────────────────
-        if yolo_result.masks is None:
-            # No masks returned — this should never happen with a segmentation
-            # model. If you see this warning, you may have deployed a detection-
-            # only model (no seg head). All lines will fall back to "solid".
-            warnings.warn(
-                "[Module A] yolo_result.masks is None — expected a segmentation "
-                "model output. Check that the correct model weights are loaded. "
-                "Falling back to empty masks (all lines classified as solid).",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            empty_mask = np.zeros((self.h, self.w), dtype=np.uint8)
-            masks = [empty_mask] * len(detections)
-            return detections, masks
-
-        # masks.data shape: (N, mask_h, mask_w)  — values 0.0 or 1.0
-        raw_masks = yolo_result.masks.data.cpu().numpy()
-
-        masks = []
-        for i in range(raw_masks.shape[0]):
-            # Resize from YOLO's internal resolution to original frame size
-            # Use INTER_LINEAR for smooth edges, then re-threshold at 0.5
-            m = cv2.resize(
-                raw_masks[i],
-                (self.w, self.h),
-                interpolation=cv2.INTER_LINEAR,
-            )
-            # Convert float → clean binary uint8 (smooth contour edges)
-            masks.append(((m > 0.5).astype(np.uint8)) * 255)
-
-        return detections, masks

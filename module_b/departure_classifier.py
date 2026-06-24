@@ -65,22 +65,20 @@ OUTPUT
 
 from typing import Optional
 
+from states import DepartureState, LineType, ACTIVE_DEPARTURE_STATES
 
-# ── Departure state constants ─────────────────────────────────────────────
-CENTERED          = "CENTERED"
-WARN_LEFT         = "WARN_LEFT"
-WARN_RIGHT        = "WARN_RIGHT"
-DEPART_LEFT       = "DEPART_LEFT"
-DEPART_RIGHT      = "DEPART_RIGHT"
-LANE_CHANGE_LEFT  = "LANE_CHANGE_LEFT"
-LANE_CHANGE_RIGHT = "LANE_CHANGE_RIGHT"
+
+# ── Re-export for backward compatibility ─────────────────────────────────
+CENTERED          = DepartureState.CENTERED
+WARN_LEFT         = DepartureState.WARN_LEFT
+WARN_RIGHT        = DepartureState.WARN_RIGHT
+DEPART_LEFT       = DepartureState.DEPART_LEFT
+DEPART_RIGHT      = DepartureState.DEPART_RIGHT
+LANE_CHANGE_LEFT  = DepartureState.LANE_CHANGE_LEFT
+LANE_CHANGE_RIGHT = DepartureState.LANE_CHANGE_RIGHT
 
 # All non-centred states that the HUD should display actively
-ACTIVE_STATES = {
-    WARN_LEFT, WARN_RIGHT,
-    DEPART_LEFT, DEPART_RIGHT,
-    LANE_CHANGE_LEFT, LANE_CHANGE_RIGHT,
-}
+ACTIVE_STATES = ACTIVE_DEPARTURE_STATES
 
 # ── Offset thresholds (pixels) ────────────────────────────────────────────
 # Tuning reference:
@@ -97,7 +95,7 @@ def classify_departure(
     smoothed_offset: Optional[float],
     left_type:       str = "solid",
     right_type:      str = "solid",
-) -> str:
+) -> DepartureState:
     """
     Map a smoothed lateral offset to one of 6 departure states.
 

@@ -63,7 +63,8 @@ from typing import Optional
 
 # Reference row for polynomial evaluation — bottom 15% of the frame.
 # Matches the A5 plan note: y = 0.85 × H in camera-view coordinates.
-REF_Y_FRAC = 0.85
+REF_Y_FRACS = (0.68, 0.74, 0.80, 0.86)
+REF_Y_FRAC = REF_Y_FRACS[-1]  # backward-compatible export
 
 # Camera mounting bias correction (pixels).
 # If the dashcam is not perfectly centred on the car, it will produce
@@ -116,11 +117,13 @@ def compute_lateral_offset(
         # Caller (EMA smoother) will hold the last smoothed value instead.
         return None
 
-    ref_y = REF_Y_FRAC * frame_h
     frame_center = frame_w / 2.0
 
-    left_x  = float(np.polyval(left_poly,  ref_y))
-    right_x = float(np.polyval(right_poly, ref_y))
+    ref_ys = np.array([frac * frame_h for frac in REF_Y_FRACS], dtype=np.float64)
+    left_xs = np.polyval(left_poly, ref_ys).astype(np.float64)
+    right_xs = np.polyval(right_poly, ref_ys).astype(np.float64)
+    widths = right_xs - left_xs
+    centers = (left_xs + right_xs) * 0.5
 
     # ── Plausibility guard: lane width sanity check ─────────────────────────
     # If Module A mistakes a road edge, barrier, or adjacent lane for
@@ -128,16 +131,19 @@ def compute_lateral_offset(
     # A real ego lane at y ≈ 0.85H spans 120–900 px on a 1080p dashcam.
     # Outside this range: reject the measurement and let the EMA smoother
     # hold its last good value rather than injecting garbage.
-    MIN_VALID_LANE_WIDTH_PX = 120
-    MAX_VALID_LANE_WIDTH_PX = int(frame_w * 0.85)   # ~1632 px at 1920
+    MIN_VALID_LANE_WIDTH_PX = max(120.0, frame_w * 0.07)
+    MAX_VALID_LANE_WIDTH_PX = frame_w * 0.68
 
-    lane_width = right_x - left_x
-    if lane_width < MIN_VALID_LANE_WIDTH_PX or lane_width > MAX_VALID_LANE_WIDTH_PX:
-        return None   # implausible — discard this frame's measurement
-
-    # Also reject if either boundary is outside the frame (extrapolation gone wrong)
-    if left_x < 0 or right_x > frame_w:
+    valid = (
+        (widths >= MIN_VALID_LANE_WIDTH_PX)
+        & (widths <= MAX_VALID_LANE_WIDTH_PX)
+        & (left_xs >= 0)
+        & (right_xs <= frame_w)
+        & (centers >= frame_w * 0.20)
+        & (centers <= frame_w * 0.80)
+    )
+    if valid.sum() < 2:
         return None
 
-    lane_center_x = (left_x + right_x) / 2.0
+    lane_center_x = float(np.median(centers[valid]))
     return (lane_center_x - frame_center) - CAMERA_MOUNT_BIAS_PX

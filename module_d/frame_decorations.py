@@ -19,17 +19,19 @@ OUTPUT
 import numpy as np
 import cv2
 
+from .hud_colours import BRACKET_COLOUR
+from .hud_effects import draw_vignette
+
 
 # ── Bracket style ─────────────────────────────────────────────────────────
 BRACKET_LEN     = 22     # px — length of each bracket arm
 BRACKET_THICK   = 2      # line thickness
-BRACKET_COLOUR  = ( 80, 110, 200)   # muted blue — #1a6fff approx in BGR
 BRACKET_MARGIN  = 10     # px inset from frame edge
 
 
 def draw_frame_decorations(frame: np.ndarray) -> np.ndarray:
     """
-    Draw HUD-style corner bracket decorations on the frame.
+    Draw HUD-style corner bracket decorations + vignette on the frame.
 
     Parameters
     ----------
@@ -60,5 +62,8 @@ def draw_frame_decorations(frame: np.ndarray) -> np.ndarray:
     # ── Bottom-Right ──────────────────────────────────────────────────────
     cv2.line(frame, (W - m,     H - m),     (W - m - L, H - m),     c, t)
     cv2.line(frame, (W - m,     H - m),     (W - m,     H - m - L), c, t)
+
+    # ── Vignette darkening at edges (cached per resolution) ───────────────
+    frame = draw_vignette(frame, strength=0.25)
 
     return frame

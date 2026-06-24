@@ -79,6 +79,7 @@ POLY_DEGREE = 2
 def fit_boundary_polynomial(
     pts: List[Tuple[int, int]],
     prev_poly: Optional[np.ndarray] = None,
+    curve_responsive: bool = False,
 ) -> Optional[np.ndarray]:
     """
     Fit a degree-2 polynomial x = f(y) through boundary pixel coordinates.
@@ -109,8 +110,10 @@ def fit_boundary_polynomial(
     or None if no fit is possible (no current points and no prev_poly).
     """
     n = len(pts)
+    min_points = 6 if curve_responsive else MIN_POINTS_FOR_FIT
+    full_trust_points = 24 if curve_responsive else FULL_TRUST_POINTS
 
-    if n < MIN_POINTS_FOR_FIT:
+    if n < min_points:
         # Not enough points — hold previous polynomial as-is
         return prev_poly   # may be None on the very first frame
 
@@ -128,14 +131,16 @@ def fit_boundary_polynomial(
     if prev_poly is None:
         return new_poly
 
-    if n >= FULL_TRUST_POINTS:
+    if n >= full_trust_points:
         # Plenty of points — fully trust the new fit
         return new_poly
 
     # Partial detection: blend.
     # alpha = how much weight goes to the NEW polynomial (0 → all prev, 1 → all new)
-    alpha = (n - MIN_POINTS_FOR_FIT) / (FULL_TRUST_POINTS - MIN_POINTS_FOR_FIT)
+    alpha = (n - min_points) / max(1, full_trust_points - min_points)
     alpha = float(np.clip(alpha, 0.0, 1.0))
+    if curve_responsive:
+        alpha = max(alpha, 0.65)
     blended = alpha * new_poly + (1.0 - alpha) * prev_poly
     return blended
 

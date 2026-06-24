@@ -75,8 +75,24 @@ OUTPUT
 
 from .guidance_states import (
     GUIDE_NONE, GUIDE_LEFT, GUIDE_RIGHT, GUIDE_BOTH, GUIDE_SLOW, GUIDE_URGENT,
-    PROX_NONE, PROX_CLOSE, PROX_VERY_CLOSE,
+    PROX_NONE, PROX_DETECTED, PROX_CLOSE, PROX_VERY_CLOSE,
 )
+
+# ── Hysteresis: directional states persist for at least this many frames ──
+# Prevents banner flicker when occupancy detection oscillates
+MIN_DIRECTIONAL_HOLD = 3
+
+# Track state for hysteresis (module-level singleton; reset via reset_hysteresis())
+_prev_guidance = GUIDE_NONE
+_hold_counter = 0
+_DIRECTIONAL = {GUIDE_LEFT, GUIDE_RIGHT, GUIDE_BOTH}
+
+
+def reset_hysteresis():
+    """Reset the hysteresis state (e.g. on video switch)."""
+    global _prev_guidance, _hold_counter
+    _prev_guidance = GUIDE_NONE
+    _hold_counter = 0
 
 
 def decide_guidance(
@@ -108,25 +124,43 @@ def decide_guidance(
     str : one of GUIDE_NONE, GUIDE_LEFT, GUIDE_RIGHT,
                  GUIDE_BOTH, GUIDE_SLOW, GUIDE_URGENT
     """
+    global _prev_guidance, _hold_counter
+
     # ── Priority 1: Emergency — brake immediately ─────────────────────────
     if front_proximity == PROX_VERY_CLOSE:
+        _prev_guidance = GUIDE_URGENT
+        _hold_counter = 0
         return GUIDE_URGENT
 
     # ── Priority 2: Road is clear ahead — no guidance needed ──────────────
-    if front_proximity == PROX_NONE:
+    if front_proximity in (PROX_NONE, PROX_DETECTED):
+        _prev_guidance = GUIDE_NONE
+        _hold_counter = 0
         return GUIDE_NONE
 
     # ── Priority 3: Vehicle is CLOSE — evaluate lane change options ────────
-    # A lane change is only safe if the adjacent lane is clear AND
-    # the boundary on that side is dashed (legal to cross).
     can_go_left  = left_clear  and (left_type  == "dashed")
     can_go_right = right_clear and (right_type == "dashed")
 
     if can_go_left and can_go_right:
-        return GUIDE_BOTH     # both options available → prefer left (overtaking convention)
+        new_state = GUIDE_BOTH
     elif can_go_left:
-        return GUIDE_LEFT
+        new_state = GUIDE_LEFT
     elif can_go_right:
-        return GUIDE_RIGHT
+        new_state = GUIDE_RIGHT
     else:
-        return GUIDE_SLOW     # no safe lane change → reduce speed
+        new_state = GUIDE_SLOW
+
+    # ── Hysteresis: hold directional states for MIN_DIRECTIONAL_HOLD ──────
+    # If the previous state was directional and we'd now switch to SLOW,
+    # hold the directional state for a few more frames to prevent flicker.
+    if (_prev_guidance in _DIRECTIONAL
+            and new_state == GUIDE_SLOW
+            and _hold_counter < MIN_DIRECTIONAL_HOLD):
+        _hold_counter += 1
+        return _prev_guidance
+
+    # Accept the new state
+    _prev_guidance = new_state
+    _hold_counter = 0
+    return new_state
