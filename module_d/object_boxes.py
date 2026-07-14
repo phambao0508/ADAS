@@ -1,18 +1,12 @@
-"""Vehicle bounding-box overlay for HUD rendering."""
-
 from typing import Iterable, Optional, Tuple
 
 import cv2
 import numpy as np
 
-
 from .hud_colours import BOX_EGO, BOX_LEFT, BOX_RIGHT
 
-
 CLASS_NAMES = {
-    0: "CAR",
-    1: "BUS",
-    2: "TRUCK",
+
 }
 
 EGO_BOX_COLOUR   = BOX_EGO
@@ -25,28 +19,18 @@ ZONE_COLOURS = {
 }
 TEXT_BG_ALPHA = 0.78
 
-
 def draw_object_boxes(
     frame: np.ndarray,
     vehicle_detections: Iterable[Tuple],
     left_poly: Optional[np.ndarray],
     right_poly: Optional[np.ndarray],
 ) -> np.ndarray:
-    """Draw detected vehicle boxes labelled EGO / LEFT / RIGHT.
 
-    Vehicles outside the ego lane and the two adjacent lanes are skipped.
-    Each detection may be either:
-      (x1, y1, x2, y2, conf, cls_id)              — legacy, no track ID
-      (x1, y1, x2, y2, conf, cls_id, track_id)    — current, with persistent ID
-    """
     out = frame.copy()
     h, w = out.shape[:2]
 
     for det in vehicle_detections:
-        # Detection rows may arrive in any of these widths:
-        #   6: (x1,y1,x2,y2,conf,cls_id)
-        #   7: + track_id
-        #   9: + distance_m, ttc_s
+
         track_id = None
         distance_m = None
         ttc_s = None
@@ -66,7 +50,7 @@ def draw_object_boxes(
 
         zone = _classify_box_zone(x1, x2, y2, left_poly, right_poly, w, h)
         if zone == "OUT":
-            continue   # not in ego or adjacent lane — hide
+            continue
 
         colour = ZONE_COLOURS[zone]
         cls_name = CLASS_NAMES.get(int(cls_id), 'OBJ')
@@ -93,7 +77,6 @@ def draw_object_boxes(
 
     return out
 
-
 def _classify_box_zone(
     x1: float,
     x2: float,
@@ -103,12 +86,7 @@ def _classify_box_zone(
     frame_w: int,
     frame_h: int,
 ) -> str:
-    """Return "EGO", "LEFT", "RIGHT", or "OUT".
 
-    Adjacent lanes are taken to span one ego-lane-width outward from each
-    boundary, evaluated at the vehicle's own foot_y so perspective is
-    preserved (adjacent lanes narrow toward the horizon just like ego).
-    """
     if left_poly is None or right_poly is None:
         return "OUT"
 
@@ -134,7 +112,6 @@ def _classify_box_zone(
     if ego_right < foot_x <= right_outer:
         return "RIGHT"
     return "OUT"
-
 
 def _draw_label(
     frame: np.ndarray,
@@ -167,7 +144,6 @@ def _draw_label(
         cv2.LINE_AA,
     )
 
-
 def _draw_metric_label(
     frame: np.ndarray,
     label: str,
@@ -175,7 +151,7 @@ def _draw_metric_label(
     y_bottom: int,
     colour: Tuple[int, int, int],
 ) -> None:
-    """Small distance/TTC label drawn just below a bbox foot."""
+
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.42
     thick = 1
@@ -187,7 +163,6 @@ def _draw_metric_label(
     y_bot = min(frame.shape[0] - 1, y_top + th + baseline + pad_y * 2)
     x_right = min(frame.shape[1] - 1, x + tw + pad_x * 2)
 
-    # Semi-transparent dark wash so the metric is readable on any frame.
     overlay = frame.copy()
     dark = tuple(int(c * 0.25) for c in colour)
     cv2.rectangle(overlay, (x, y_top), (x_right, y_bot), dark, cv2.FILLED)

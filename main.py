@@ -3,12 +3,18 @@ import sys
 import time
 from pathlib import Path
 import os
+from collections import defaultdict
 
 # ── Suppress ultralytics progress bars ──────────────────────────────────
 os.environ["YOLO_VERBOSE"] = "False"
 
 import cv2
 import numpy as np
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 try:
     from ultralytics import YOLO
@@ -24,14 +30,14 @@ from module_d import HUDPipeline
 # ─────────────────────────────────────────────────────────────────────────────
 # ★ CONFIGURATION (Default values) ★
 # ─────────────────────────────────────────────────────────────────────────────
-INPUT_VIDEO   = r"D:\B3-ICT\ADAS\test_video\singcut3.mp4"
+INPUT_VIDEO   = r"D:\B3-ICT\ADAS\test_video\test.mp4"
 OUTPUT_VIDEO  = r"D:\B3-ICT\ADAS\output.mp4"
 
 # YOLO11s — 3-class object detection (Car, bus, truck)
 YOLO_WEIGHTS  = r"D:\B3-ICT\ADAS\model\best_yolo.pt"
 
-# ResNet34 Attention U-Net IoU60 - Lane detection
-UFLD_WEIGHTS  = r"D:\B3-ICT\ADAS\model\resnet34_attention_unet_iou60_try.pth"
+# ResNet34 Attention U-Net IoU60 — Lane detection
+LANE_WEIGHTS  = r"D:\B3-ICT\ADAS\model\resnet34_attention_unet_iou60_try.pth"
 
 CONF_THRESHOLD = 0.35
 IOU_THRESHOLD  = 0.45
@@ -44,10 +50,16 @@ def parse_args():
     p.add_argument("--output",      default=OUTPUT_VIDEO)
     p.add_argument("--yolo-model",  default=YOLO_WEIGHTS,
                    help="Path to YOLO11s weights (.pt) for object detection")
-    p.add_argument("--ufld-model",  default=UFLD_WEIGHTS,
+    p.add_argument("--lane-model",  default=LANE_WEIGHTS,
                    help="Path to ResNet34 Attention U-Net weights (.pth) for lane detection")
     p.add_argument("--conf",        type=float, default=CONF_THRESHOLD)
     p.add_argument("--iou",         type=float, default=IOU_THRESHOLD)
+    p.add_argument("--benchmark-frames", type=int, default=0,
+                   help="Process only the first N frames for runtime benchmarking. "
+                        "Use 0 to process the full video.")
+    p.add_argument("--no-output-video", action="store_true",
+                   help="Skip writing the rendered output video. Useful for measuring "
+                        "pipeline speed without MP4 encoding overhead.")
 
     # ── Monocular distance / TTC calibration ──────────────────────────────
     p.add_argument("--cam-height",  type=float, default=1.4,
@@ -83,6 +95,10 @@ def open_writer(path: str, w: int, h: int, fps: float):
     writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
     return writer
 
+def sync_cuda():
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     args = parse_args()
@@ -91,21 +107,25 @@ def main():
         sys.exit(f"[ERROR] Missing input video: {args.input}")
     if not Path(args.yolo_model).exists():
         sys.exit(f"[ERROR] Missing YOLO weights: {args.yolo_model}")
-    if not Path(args.ufld_model).exists():
-        sys.exit(f"[ERROR] Missing ResNet34 Attention U-Net weights: {args.ufld_model}")
+    if not Path(args.lane_model).exists():
+        sys.exit(f"[ERROR] Missing ResNet34 Attention U-Net weights: {args.lane_model}")
 
     # ── Load dual models ──────────────────────────────────────────────────
     print("[INFO] Loading YOLO11s (object detection)...")
     yolo_model = YOLO(args.yolo_model)
 
     print("[INFO] Loading ResNet34 Attention U-Net IoU60 (lane detection)...")
-    ufld_model = UNetResNet34Wrapper(model_path=args.ufld_model)
+    lane_model = UNetResNet34Wrapper(model_path=args.lane_model)
 
     cap, W, H, fps, total = open_video(args.input)
-    writer = open_writer(args.output, W, H, fps)
+    writer = None if args.no_output_video else open_writer(args.output, W, H, fps)
 
     print(f"[INFO] Video: {W}x{H} @ {fps:.1f} fps, {total} frames")
     print(f"[INFO] Dual-model pipeline ready.")
+    if args.benchmark_frames > 0:
+        print(f"[INFO] Benchmark mode: processing first {args.benchmark_frames} frames only.")
+    if args.no_output_video:
+        print("[INFO] Output video writing disabled for benchmark.")
 
     # ── Camera intrinsics: auto-detect calibration file ───────────────────
     calib_path = args.calib_file
@@ -151,6 +171,7 @@ def main():
     hud_pipe  = HUDPipeline()
 
     stats = {"frames": 0, "lane_valid": 0, "departure": {}, "guidance": {}}
+    timing = defaultdict(float)
     offset_samples = []          # collect raw offsets for bias calibration
     lane_loss_streak = 0         # consecutive frames with no lane data
     LANE_LOSS_RESET_FRAMES = 45  # reset EMA after ~1.5 s of no lane data
@@ -162,22 +183,36 @@ def main():
             if not ret: break
 
             # ── Undistort frame nếu có custom calibration ─────────────
+            t0 = time.perf_counter()
             frame = intrinsics.undistort(frame)
+            timing["undistort"] += time.perf_counter() - t0
 
             stats["frames"] += 1
 
             # ── YOLO: Object detection (Car, bus, truck) ──────────────────
+            sync_cuda()
+            t0 = time.perf_counter()
             yolo_result = yolo_model(frame, conf=args.conf, iou=args.iou, verbose=False)[0]
+            sync_cuda()
+            timing["yolo_detection"] += time.perf_counter() - t0
 
             # ── ResNet34 Attention U-Net IoU60: Lane detection ────────────
-            ufld_lanes = ufld_model.detect_lanes(frame)
+            sync_cuda()
+            t0 = time.perf_counter()
+            detected_lanes = lane_model.detect_lanes(frame)
+            sync_cuda()
+            timing["lane_segmentation"] += time.perf_counter() - t0
 
             # ── Module A: Lane pipeline (uses IoU60 U-Net lanes) ──────────
-            lane_result = lane_pipe.process(frame, ufld_lanes)
+            t0 = time.perf_counter()
+            lane_result = lane_pipe.process(frame, detected_lanes)
+            timing["module_a_lane_tracking"] += time.perf_counter() - t0
             if lane_result.valid: stats["lane_valid"] += 1
 
             # ── Module B: Departure warning (uses lane_result) ────────────
+            t0 = time.perf_counter()
             dept_result = dept_pipe.process(lane_result)
+            timing["module_b_departure"] += time.perf_counter() - t0
             stats["departure"][dept_result.state] = stats["departure"].get(dept_result.state, 0) + 1
 
             # ── Track raw offset for bias calibration diagnostic ──────────
@@ -193,12 +228,20 @@ def main():
                     lane_loss_streak = 0
 
             # ── Module C: Guidance (uses YOLO vehicles + lane polys) ──────
+            t0 = time.perf_counter()
             guid_result = guid_pipe.process(yolo_result, lane_result)
+            timing["module_c_guidance"] += time.perf_counter() - t0
             stats["guidance"][guid_result.guidance] = stats["guidance"].get(guid_result.guidance, 0) + 1
 
             # ── Module D: Render & Write ──────────────────────────────────
+            t0 = time.perf_counter()
             output_frame = hud_pipe.render(frame, lane_result, dept_result, guid_result)
-            writer.write(output_frame)
+            timing["module_d_hud_render"] += time.perf_counter() - t0
+
+            if writer is not None:
+                t0 = time.perf_counter()
+                writer.write(output_frame)
+                timing["video_write"] += time.perf_counter() - t0
 
             if stats["frames"] % LOG_EVERY_N == 0:
                 avg_off = (sum(offset_samples[-LOG_EVERY_N:]) / len(offset_samples[-LOG_EVERY_N:])
@@ -207,17 +250,30 @@ def main():
                       f"State: {dept_result.state:<15} | "
                       f"raw_offset: {dept_result.raw_offset!s:>8} | "
                       f"avg_offset(last {LOG_EVERY_N}): {avg_off:+.1f} px | "
-                      f"lanes: {len(ufld_lanes)}")
+                      f"lanes: {len(detected_lanes)}")
+
+            if args.benchmark_frames > 0 and stats["frames"] >= args.benchmark_frames:
+                break
 
     finally:
         cap.release()
-        writer.release()
+        if writer is not None:
+            writer.release()
         elapsed = time.time() - t_start
         total_f = max(1, stats["frames"])
 
         print(f"\n{'='*65}\n  ADAS Processing Complete (Dual-Model: YOLO + ResNet34 Attention U-Net IoU60)")
         print(f"  Lane valid   : {stats['lane_valid']} / {total_f} ({100*stats['lane_valid']/total_f:.1f}%)")
         print(f"  Speed        : {total_f/max(0.1, elapsed):.1f} fps")
+        print(f"  Avg latency  : {1000*elapsed/total_f:.2f} ms/frame")
+
+        print("\n  Runtime breakdown:")
+        for name, seconds in sorted(timing.items()):
+            ms_per_frame = 1000.0 * seconds / total_f
+            print(f"    {name:<26} {ms_per_frame:>8.2f} ms/frame")
+        total_ms = 1000.0 * elapsed / total_f
+        print(f"    {'total_end_to_end':<26} {total_ms:>8.2f} ms/frame")
+        print(f"    {'effective_fps':<26} {1000.0 / max(0.001, total_ms):>8.2f} fps")
 
         print("\n  Departure state breakdown:")
         if stats["departure"]:

@@ -1,9 +1,3 @@
-"""
-Module D - HUD Pipeline (Orchestrator)
-======================================
-Single entry point for Module D.
-"""
-
 import numpy as np
 
 from .lane_fill import draw_lane_fill
@@ -14,14 +8,8 @@ from .object_boxes import draw_object_boxes
 from .telemetry_panel import draw_telemetry_panel
 from .frame_decorations import draw_frame_decorations
 
-
 class HUDPipeline:
-    """Composite all HUD layers onto a video frame."""
 
-    # Keep the last stable lane for several seconds when the detector drops
-    # out. This avoids visible 3-5 s flicker during short occlusions, glare,
-    # shadows, or road-paint gaps while still allowing the pipeline to reset
-    # after sustained loss.
     MAX_RENDER_HOLD_FRAMES = 180
     POLY_SMOOTH_ALPHA = 0.28
     MAX_CENTER_JUMP_PX = 100.0
@@ -61,11 +49,6 @@ class HUDPipeline:
         right_poly = lane_result.right_poly
         measure = self._measure_pair(left_poly, right_poly, frame_w, frame_h)
 
-        # Only treat as a fresh detection when Module A actually found both
-        # boundaries this frame. Without this gate, held polys (forwarded by
-        # lane_pipeline when ego.found is False) pass `measure` and overwrite
-        # the stable pts with []  — which makes draw_lane_fill fall back to
-        # its default y-range and drop the whole polygon for that frame.
         accepts_new_lane = measure is not None and getattr(lane_result, "valid", False)
         if accepts_new_lane and self._stable_measure is not None:
             prev_center, prev_width = self._stable_measure
@@ -132,15 +115,13 @@ class HUDPipeline:
         dept_result,
         guid_result,
     ) -> np.ndarray:
-        """Composite all HUD layers and return the annotated frame."""
+
         out = frame.copy()
 
         left_poly, right_poly, left_fill_pts, right_fill_pts, lane_detected = (
             self._stable_render_lane(lane_result, out.shape)
         )
 
-        # D1: Ego-lane fill polygon. This is a true lane-area fill between the
-        # two fitted boundaries, with no grow/reveal/breathing animation.
         out = draw_lane_fill(
             out,
             left_poly,
@@ -151,8 +132,6 @@ class HUDPipeline:
             fill_progress=1.0 if lane_detected else 0.0,
         )
 
-        # D2: Vehicle object boxes. Ego-lane objects are red; other-lane
-        # objects are blue.
         out = draw_object_boxes(
             out,
             getattr(guid_result, "vehicle_detections", []),
@@ -160,21 +139,18 @@ class HUDPipeline:
             right_poly,
         )
 
-        # D3: Departure status HUD (top-right)
         out = draw_status_hud(
             out,
             dept_result.state,
             dept_result.smoothed_offset,
         )
 
-        # D4: Guidance banner (center-top, only when active)
         out = draw_guidance_banner(
             out,
             guid_result.guidance,
             guid_result.message,
         )
 
-        # D5: Mini-map (bottom-left)
         out = draw_mini_map(
             out,
             dept_result.state,
@@ -187,7 +163,6 @@ class HUDPipeline:
             guid_result.guidance,
         )
 
-        # D6: Telemetry panel (bottom-right)
         out = draw_telemetry_panel(
             out,
             guid_result.front_proximity,
@@ -202,7 +177,6 @@ class HUDPipeline:
             front_ttc_s=getattr(guid_result, "front_ttc_s", None),
         )
 
-        # D7: Frame corner decorations (top layer)
         out = draw_frame_decorations(out)
 
         return out
